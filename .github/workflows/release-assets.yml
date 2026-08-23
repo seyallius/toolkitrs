@@ -9,8 +9,22 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write   # Required for the release job (creating a GitHub Release)
+
 jobs:
   build:
-    uses: seyallius/github-workflows/.github/workflows/build-binaries.yml@v2
+    uses: seyallius/github-workflows/.github/workflows/build-assets.yml@v3
     with:
       binary_name: toolkitrs
+      # You can also override targets, build_command, etc. if needed.
+      # targets: x86_64-unknown-linux-gnu,x86_64-pc-windows-msvc
+
+  release:
+    needs: build
+    uses: seyallius/github-workflows/.github/workflows/release-assets.yml@v3
+    with:
+      artifact_pattern: toolkitrs*    # Matches your binary_name used in the build
+      generate_release_notes: true    # Optional, defaults to true
+      draft: false                    # Optional, defaults to false
+      prerelease: false               # Optional, defaults to false
