@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    uses: seyallius/github-workflows/.github/workflows/build-assets.yml@v3
+    uses: seyallius/github-workflows/.github/workflows/build-assets.yml@v4
     with:
       binary_name: toolkitrs
       # You can also override targets, build_command, etc. if needed.
