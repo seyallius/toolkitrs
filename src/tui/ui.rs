@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, List, Paragraph},
+    widgets::{Block, BorderType, Borders, Gauge, List, ListState, Paragraph},
     Frame,
 };
 
@@ -94,7 +94,11 @@ fn render_home(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(DIM))
             .title(" Choose a workflow "),
     );
-    f.render_widget(list, area);
+
+    // Use ListState to enable scrolling
+    let mut state = ListState::default();
+    state.select(Some(app.home_index));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 /// Renders the directory/file browser with selection marks.
@@ -142,7 +146,11 @@ fn render_picker(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(DIM))
             .title(header),
     );
-    f.render_widget(list, area);
+
+    // Use ListState to enable scrolling
+    let mut state = ListState::default();
+    state.select(Some(app.picker_index));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 /// Renders the options list with current values.
@@ -185,7 +193,11 @@ fn render_options(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(DIM))
             .title(format!(" Options · {subtitle} ")),
     );
-    f.render_widget(list, area);
+
+    // Use ListState to enable scrolling
+    let mut state = ListState::default();
+    state.select(Some(app.options_index));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 /// Renders the running screen: per-file statuses + live log + progress gauge.
@@ -232,7 +244,13 @@ fn render_status_list(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(DIM))
             .title(" Files "),
     );
-    f.render_widget(list, area);
+
+    // Use ListState to auto-scroll to the bottom as files finish
+    let mut state = ListState::default();
+    if !app.file_statuses.is_empty() {
+        state.select(Some(app.file_statuses.len() - 1));
+    }
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 /// Renders the scrolling ffmpeg log, pinned to the newest lines.
