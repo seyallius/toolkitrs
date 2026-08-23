@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod components;
 mod ffmpeg;
+mod tui;
 mod util;
 
 use anyhow::Result;

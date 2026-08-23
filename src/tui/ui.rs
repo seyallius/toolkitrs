@@ -1,0 +1,310 @@
+//! module ui - Pure rendering layer. Reads `App` state and draws widgets.
+//! No mutation happens here; that keeps drawing predictable and testable.
+
+use crate::tui::app::{App, Screen, StatusState};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Gauge, List, Paragraph},
+    Frame,
+};
+
+/// Accent color used for highlights and selections.
+const ACCENT: Color = Color::Cyan;
+/// Dim color for secondary text.
+const DIM: Color = Color::DarkGray;
+
+/// Draws the entire frame based on the current app state.
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    render_header(f, app, chunks[0]);
+    match app.screen {
+        Screen::Home => render_home(f, app, chunks[1]),
+        Screen::FilePicker => render_picker(f, app, chunks[1]),
+        Screen::Options => render_options(f, app, chunks[1]),
+        Screen::Running => render_running(f, app, chunks[1]),
+    }
+    render_footer(f, app, chunks[2]);
+}
+
+/// Renders the boxed header with app title and a breadcrumb.
+fn render_header(f: &mut Frame, app: &App, area: Rect) {
+    let crumb = match app.screen {
+        Screen::Home => "workflows".to_string(),
+        Screen::FilePicker => format!(
+            "{} · {}",
+            app.selected_workflow.map(|w| w.title()).unwrap_or(""),
+            app.cwd.display()
+        ),
+        Screen::Options => "options".to_string(),
+        Screen::Running => "running".to_string(),
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            " toolkit ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("· terminal media workflows ", Style::default().fg(DIM)),
+        Span::styled(format!("· {crumb}"), Style::default().fg(Color::Magenta)),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(DIM))
+        .title(title);
+    f.render_widget(block, area);
+}
+
+/// Renders the workflow selection list.
+fn render_home(f: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<Line> = app
+        .workflows
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let selected = i == app.home_index;
+            let marker = if selected { "▶" } else { " " };
+            let style = if selected {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(format!(" {marker} "), style),
+                Span::styled(format!("{:<10}", w.title()), style),
+                Span::styled(w.description(), Style::default().fg(DIM)),
+            ])
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(DIM))
+            .title(" Choose a workflow "),
+    );
+    f.render_widget(list, area);
+}
+
+/// Renders the directory/file browser with selection marks.
+fn render_picker(f: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<Line> = app
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let cursor = i == app.picker_index;
+            let is_selected = !e.is_dir && app.selected_files.contains(&e.path);
+            let icon = if e.is_dir {
+                "📁"
+            } else if is_selected {
+                "✓"
+            } else {
+                "•"
+            };
+            let style = if cursor {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else if is_selected {
+                Style::default().fg(Color::Green)
+            } else if e.is_dir {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(format!(" {} ", if cursor { "▶" } else { " " }), style),
+                Span::styled(format!("{icon} "), style),
+                Span::styled(&e.name, style),
+            ])
+        })
+        .collect();
+
+    let header = format!(
+        " {} selected · {}",
+        app.selected_files.len(),
+        app.cwd.display()
+    );
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(DIM))
+            .title(header),
+    );
+    f.render_widget(list, area);
+}
+
+/// Renders the options list with current values.
+fn render_options(f: &mut Frame, app: &App, area: Rect) {
+    let wf = app.selected_workflow;
+    let rows = vec![
+        format!(
+            "Force overwrite      : {}",
+            if app.options.force { "ON" } else { "OFF" }
+        ),
+        format!("Audio bitrate        : {} kbps", app.options.bitrate),
+        format!("Cover size           : {} px", app.options.cover_size),
+        format!(
+            "Output directory     : {}",
+            app.options.output_dir.display()
+        ),
+        "▶ Start".to_string(),
+    ];
+
+    let items: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let cursor = i == app.options_index;
+            let style = if cursor {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if cursor { "▶" } else { " " };
+            Line::from(vec![Span::styled(format!(" {prefix} {text}"), style)])
+        })
+        .collect();
+
+    let subtitle = wf.map(|w| w.title()).unwrap_or("");
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(DIM))
+            .title(format!(" Options · {subtitle} ")),
+    );
+    f.render_widget(list, area);
+}
+
+/// Renders the running screen: per-file statuses + live log + progress gauge.
+fn render_running(f: &mut Frame, app: &App, area: Rect) {
+    // Reserve a bounded region for the file list, rest goes to the log.
+    let status_height = (app.file_statuses.len() as u16 + 2).min(10);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(status_height),
+            Constraint::Min(3),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    render_status_list(f, app, chunks[0]);
+    render_log(f, app, chunks[1]);
+    render_progress(f, app, chunks[2]);
+}
+
+/// Renders each file with a state icon (pending/running/done/failed).
+fn render_status_list(f: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<Line> = app
+        .file_statuses
+        .iter()
+        .map(|s| {
+            let (icon, color) = match s.state {
+                StatusState::Pending => ("·", DIM),
+                StatusState::Running => (app.spinner(), ACCENT),
+                StatusState::Done => ("✔", Color::Green),
+                StatusState::Failed => ("✘", Color::Red),
+            };
+            Line::from(vec![
+                Span::styled(format!(" {icon} "), Style::default().fg(color)),
+                Span::styled(s.path.display().to_string(), Style::default()),
+            ])
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(DIM))
+            .title(" Files "),
+    );
+    f.render_widget(list, area);
+}
+
+/// Renders the scrolling ffmpeg log, pinned to the newest lines.
+fn render_log(f: &mut Frame, app: &App, area: Rect) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let start = app.log.len().saturating_sub(visible);
+    let text = app.log[start..].join("\n");
+    let log = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(DIM))
+            .title(" ffmpeg output "),
+    );
+    f.render_widget(log, area);
+}
+
+/// Renders an overall progress gauge across all files.
+fn render_progress(f: &mut Frame, app: &App, area: Rect) {
+    let total = app.file_statuses.len();
+    let done = app
+        .file_statuses
+        .iter()
+        .filter(|s| matches!(s.state, StatusState::Done | StatusState::Failed))
+        .count();
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        done as f64 / total as f64
+    };
+
+    let label = if app.running {
+        format!("{} processing {done}/{total}", app.spinner())
+    } else if app.finished {
+        format!("done · {} ok · {} failed", app.succeeded, app.failed)
+    } else {
+        format!("{done}/{total}")
+    };
+
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(DIM))
+                .title(" Progress "),
+        )
+        .gauge_style(Style::default().fg(ACCENT))
+        .ratio(ratio)
+        .label(Span::styled(
+            label,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(gauge, area);
+}
+
+/// Renders the context-sensitive keybinding hints bar.
+fn render_footer(f: &mut Frame, app: &App, area: Rect) {
+    let hints = match app.screen {
+        Screen::Home => "↑↓ move · ⏎ select · q quit",
+        Screen::FilePicker => {
+            "↑↓ move · ⏎ enter dir/confirm · space toggle · ⌃a all · ⌫ up · b back"
+        }
+        Screen::Options => "↑↓ move · ←→ adjust · ⏎ toggle/start · b back · q quit",
+        Screen::Running => {
+            if app.running {
+                "please wait…"
+            } else {
+                "⏎/esc home · q quit"
+            }
+        }
+    };
+    let footer = Paragraph::new(Span::styled(hints, Style::default().fg(DIM)));
+    f.render_widget(footer, area);
+}

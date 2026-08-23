@@ -69,6 +69,9 @@ pub enum Command {
 
     /// Wrap a video with a companion image; supports interactive MP4 batch discovery.
     Vidwrap(VidwrapArgs),
+
+    /// Launch the interactive terminal UI (ratatui).
+    Tui,
 }
 
 /// Common conversion options shared by batch processing commands.
