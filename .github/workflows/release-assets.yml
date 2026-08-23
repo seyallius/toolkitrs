@@ -22,7 +22,7 @@ jobs:
 
   release:
     needs: build
-    uses: seyallius/github-workflows/.github/workflows/release-assets.yml@v3
+    uses: seyallius/github-workflows/.github/workflows/release-assets.yml@v4
     with:
       artifact_pattern: toolkitrs*    # Matches your binary_name used in the build
       generate_release_notes: true    # Optional, defaults to true
