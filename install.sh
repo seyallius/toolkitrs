@@ -18,7 +18,7 @@ ARCH="$(uname -m)"
 
 case "$OS" in
     Linux*)  OS_STR="unknown-linux-gnu"; EXT="tar.gz";;
-    Darwin*) OS_STR="apple-darwin"; EXT="tar.gz";; # macOS usually uses tar.gz for Rust binaries
+    Darwin*) OS_STR="apple-darwin"; EXT="tar.gz";;
     *)       echo "❌ Unsupported OS: $OS"; exit 1;;
 esac
 
@@ -29,17 +29,14 @@ case "$ARCH" in
 esac
 
 TARGET="${ARCH_STR}-${OS_STR}"
-ASSET_NAME="${BINARY_NAME}-${TARGET}.${EXT}"
 
 # ----------------------- Version Resolution -----------------------
 
-# If a version is passed as the first argument, use it. Otherwise, fetch the latest.
 if [ -n "$1" ]; then
     VERSION="$1"
     echo "📦 Installing $BINARY_NAME version $VERSION for $TARGET..."
 else
     echo "🔍 Fetching latest version..."
-    # Query GitHub API and parse the tag_name without needing `jq`
     VERSION=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [ -z "$VERSION" ]; then
         echo "❌ Failed to fetch latest version. Check your internet connection or repo name."
@@ -50,7 +47,10 @@ fi
 
 # ----------------------- Download & Extract -----------------------
 
+# 👇 FIXED: Include $VERSION in the asset name to match your CI output
+ASSET_NAME="${BINARY_NAME}-${VERSION}-${TARGET}.${EXT}"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_NAME}"
+
 TMP_DIR=$(mktemp -d)
 cd "$TMP_DIR"
 

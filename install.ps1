@@ -16,10 +16,8 @@ $InstallDir = "$env:LOCALAPPDATA\Programs\toolkitrs"
 
 # ----------------------- Arch Detection -----------------------
 
-# Standard Rust Windows target is x86_64-pc-windows-msvc
 $Arch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
 $Target = "$Arch-pc-windows-msvc"
-$AssetName = "$BinaryName-$Target.zip"
 
 # ----------------------- Version Resolution -----------------------
 
@@ -33,7 +31,9 @@ Write-Host "📦 Installing $BinaryName version $Version for $Target..."
 
 # ----------------------- Download & Extract -----------------------
 
+$AssetName = "$BinaryName-$Version-$Target.zip"
 $DownloadUrl = "https://github.com/$Repo/releases/download/$Version/$AssetName"
+
 $TempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
 $ZipPath = Join-Path $TempDir $AssetName
 
