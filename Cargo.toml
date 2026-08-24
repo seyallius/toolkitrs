@@ -1,6 +1,6 @@
 [package]
 name = "toolkitrs"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "A unified FFmpeg workflow CLI for batch media conversion, remuxing, and thumbnail embedding"
 license = "MIT OR Apache-2.0"
