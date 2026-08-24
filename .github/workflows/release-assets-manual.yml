@@ -20,15 +20,16 @@ permissions:
 
 jobs:
   build:
-    uses: seyallius/github-workflows/.github/workflows/build-assets.yml@v0.4.1
+    uses: seyallius/github-workflows/.github/workflows/build-assets.yml@v0.4.2
     with:
       binary_name: toolkitrs
+      version: ${{ inputs.tag }}   # Pass the manual tag input
       # You can also override targets, build_command, etc. if needed.
       # targets: x86_64-unknown-linux-gnu,x86_64-pc-windows-msvc
 
   release:
     needs: build
-    uses: seyallius/github-workflows/.github/workflows/release-assets.yml@v4
+    uses: seyallius/github-workflows/.github/workflows/release-assets.yml@v0.4.2
     with:
       artifact_pattern: toolkitrs*                      # Matches your binary_name used in the build
       generate_release_notes: false                     # Don't overwrite existing notes
