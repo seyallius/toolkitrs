@@ -12,7 +12,8 @@ and rich CLI help.
   progress
 - **Unified CLI**: One binary for all media workflows (`ts2mp4`, `mkv2mp3`, `mp32mp4`, `vidwrap`)
 - **Batch Processing**: Automatic directory scanning with skip/overwrite logic
-- **Interactive Sibling Discovery**: If you provide one file and related files exist nearby, toolkitrs can ask whether to
+- **Interactive Sibling Discovery**: If you provide one file and related files exist nearby, toolkitrs can ask whether
+  to
   process them too
 - **Error Policies**: Choose whether to stop, skip, or prompt after each file during batch processing
 - **Safe Defaults**: Prevents accidental data loss with explicit `--force` flags
@@ -23,7 +24,33 @@ and rich CLI help.
 
 ## 📦 Installation
 
-### Pre-built Binary (Fastest)
+### Quick Install (Linux / macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/seyallius/toolkitrs/main/install.sh | bash
+```
+
+*To install a specific version:*
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/seyallius/toolkitrs/main/install.sh | bash -s v0.1.8
+```
+
+### Quick Install (Windows)
+
+Open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/seyallius/toolkitrs/main/install.ps1 | iex
+```
+
+*To install a specific version:*
+
+```powershell
+iex "& { $(irm https://raw.githubusercontent.com/seyallius/toolkitrs/main/install.ps1) } -Version v0.1.8"
+```
+
+### Pre-built Binary (via Cargo Binstall)
 
 ```bash
 # Install cargo-binstall first if you haven't
@@ -77,7 +104,8 @@ toolkitrs vidwrap --help
 
 ## 🖥️ Interactive Terminal UI (TUI)
 
-If you prefer a visual, keyboard-driven experience, simply run `toolkitrs` without any arguments to launch the interactive
+If you prefer a visual, keyboard-driven experience, simply run `toolkitrs` without any arguments to launch the
+interactive
 Terminal UI.
 
 The TUI provides:
