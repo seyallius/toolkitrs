@@ -8,9 +8,17 @@ on:
   push:
     tags:
       - "v*"
+  # Manual fallback: lets you build + release for any existing tag
+  # without having to delete and re-push it.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to build and release (e.g. v0.1.9)"
+        required: true
+        type: string
 
 permissions:
-  contents: write   # Required for the release job (creating a GitHub Release)
+  contents: write
 
 jobs:
   build:
@@ -24,7 +32,8 @@ jobs:
     needs: build
     uses: seyallius/github-workflows/.github/workflows/release-assets.yml@v4
     with:
-      artifact_pattern: toolkitrs*    # Matches your binary_name used in the build
-      generate_release_notes: true    # Optional, defaults to true
-      draft: false                    # Optional, defaults to false
-      prerelease: false               # Optional, defaults to false
+      artifact_pattern: toolkitrs*                      # Matches your binary_name used in the build
+      generate_release_notes: true                      # Optional, defaults to true
+      draft: false                                      # Optional, defaults to false
+      prerelease: false                                 # Optional, defaults to false
+      tag_name: ${{ inputs.tag || github.ref_name }}    # Pass the manual tag through if provided, otherwise fall back to ref_name
