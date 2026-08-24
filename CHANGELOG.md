@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/seyallius/toolkitrs/compare/v0.1.9...v0.1.10) - 2026-08-24
+
+### Added
+
+- *(install)* add one-line installation scripts for Unix and Windows
+- *(cli)* launch TUI by default when no subcommand is provided
+
+### Other
+
+- rename project from toolkit to toolkitrs
+
 ## [0.1.9](https://github.com/seyallius/toolkitrs/compare/v0.1.8...v0.1.9) - 2026-08-23
 
 ### Added
