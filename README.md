@@ -1,5 +1,10 @@
 # 🛠️ toolkitrs
 
+![GitHub Release Downloads](https://img.shields.io/github/downloads/seyallius/toolkitrs/total?label=downloads&logo=github&color=pink&style=for-the-badge)
+![Latest Release Downloads](https://img.shields.io/github/downloads/seyallius/toolkit/latest/total?label=latest%20release&logo=github&style=for-the-badge)
+![Crates.io Downloads](https://img.shields.io/crates/d/toolkitrs?label=cargo%20installs&logo=rust&color=orange&style=for-the-badge)
+![GitHub Stars](https://img.shields.io/github/stars/seyallius/toolkit?style=social)
+
 > A unified FFmpeg workflow CLI and interactive TUI for common media tasks.
 
 A fast, single-binary replacement for mixed PowerShell/Go media scripts. Built with Rust, it provides safe,
@@ -13,8 +18,7 @@ and rich CLI help.
 - **Unified CLI**: One binary for all media workflows (`ts2mp4`, `mkv2mp3`, `mp32mp4`, `vidwrap`)
 - **Batch Processing**: Automatic directory scanning with skip/overwrite logic
 - **Interactive Sibling Discovery**: If you provide one file and related files exist nearby, toolkitrs can ask whether
-  to
-  process them too
+  to process them too
 - **Error Policies**: Choose whether to stop, skip, or prompt after each file during batch processing
 - **Safe Defaults**: Prevents accidental data loss with explicit `--force` flags
 - **Rich UX**: Spinners, progress lines, colored output, and interactive prompts
@@ -105,8 +109,7 @@ toolkitrs vidwrap --help
 ## 🖥️ Interactive Terminal UI (TUI)
 
 If you prefer a visual, keyboard-driven experience, simply run `toolkitrs` without any arguments to launch the
-interactive
-Terminal UI.
+interactive Terminal UI.
 
 The TUI provides:
 
