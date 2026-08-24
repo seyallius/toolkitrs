@@ -2,7 +2,7 @@
 
 ## Project overview
 
-`toolkit` is a Rust 2021 command-line application for small, dependable
+`toolkitrs` is a Rust 2021 command-line application for small, dependable
 FFmpeg media workflows. The maintained application is the Cargo crate at the
 repository root. It currently provides the `ts2mp4`, `mkv2mp3`, `mp32mp4`, and
 `vidwrap` subcommands.

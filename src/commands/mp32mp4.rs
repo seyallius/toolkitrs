@@ -29,7 +29,7 @@ const FILE_TYPE_NAME: &str = "MP3";
 const DEFAULT_BITRATE: u32 = 320;
 
 /// Prefix for temporary cover image files.
-const TEMP_COVER_PREFIX: &str = "toolkit-cover-";
+const TEMP_COVER_PREFIX: &str = "toolkitrs-cover-";
 
 /// Suffix for temporary cover image files.
 const TEMP_COVER_SUFFIX: &str = ".jpg";

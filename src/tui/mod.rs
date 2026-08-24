@@ -1,4 +1,4 @@
-//! module tui - Interactive terminal UI for the toolkit built on ratatui.
+//! module tui - Interactive terminal UI for the toolkitrs built on ratatui.
 //!
 //! Responsibilities are split deliberately (Single Responsibility):
 //!   * `app`      → state machine + input handling

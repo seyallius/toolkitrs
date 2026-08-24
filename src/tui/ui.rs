@@ -51,7 +51,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     };
     let title = Line::from(vec![
         Span::styled(
-            " toolkit ",
+            " toolkitrs ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled("· terminal media workflows ", Style::default().fg(DIM)),

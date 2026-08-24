@@ -3,7 +3,7 @@ use predicates::prelude::*;
 
 #[test]
 fn help_lists_subcommands() {
-    Command::cargo_bin("toolkit")
+    Command::cargo_bin("toolkitrs")
         .unwrap()
         .arg("--help")
         .assert()
@@ -14,7 +14,7 @@ fn help_lists_subcommands() {
 
 #[test]
 fn vidwrap_requires_a_video() {
-    Command::cargo_bin("toolkit")
+    Command::cargo_bin("toolkitrs")
         .unwrap()
         .arg("vidwrap")
         .assert()

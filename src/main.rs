@@ -1,4 +1,4 @@
-//! toolkit - FFmpeg workflows for common media tasks.
+//! toolkitrs - FFmpeg workflows for common media tasks.
 
 mod cli;
 mod commands;
@@ -10,7 +10,7 @@ mod util;
 use anyhow::Result;
 use clap::Parser;
 
-/// Entry point of the toolkit.
+/// Entry point of the toolkitrs.
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     commands::run(cli)

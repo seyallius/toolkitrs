@@ -92,7 +92,7 @@ fn run_one(
         }
         Workflow::Mp32Mp4 => {
             let out = output::output_path(input, &options.output_dir, "mp4")?;
-            let cover = files::temp_path("toolkit-tui-cover-", ".jpg")?;
+            let cover = files::temp_path("toolkitrs-tui-cover-", ".jpg")?;
             // Step 1 (non-fatal): try to extract embedded cover art.
             let _ = exec(tx, ffmpeg_path, args::extract_embedded_cover(input, &cover));
             let has_cover = cover.metadata().map(|m| m.len() > 0).unwrap_or(false);
@@ -113,7 +113,7 @@ fn run_one(
         }
         Workflow::Mkv2Mp3 => {
             let out = output::output_path(input, &options.output_dir, "mp3")?;
-            let cover = files::temp_path("toolkit-tui-cover-", ".jpg")?;
+            let cover = files::temp_path("toolkitrs-tui-cover-", ".jpg")?;
             // Step 1 (non-fatal): grab a frame for cover art.
             let has_cover = exec(
                 tx,

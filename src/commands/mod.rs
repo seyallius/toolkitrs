@@ -1,4 +1,4 @@
-//! module commands - Subcommand implementations for the toolkit.
+//! module commands - Subcommand implementations for the toolkitrs.
 //! It dispatches CLI subcommands to their respective handler implementations.
 
 pub mod batch;

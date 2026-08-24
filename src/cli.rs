@@ -10,12 +10,12 @@ use std::path::PathBuf;
 
 // -------------------------------------------- Types ------------------------------------------- //
 
-/// Command line entry point for the toolkit.
+/// Command line entry point for the toolkitrs.
 ///
 /// Global options defined here apply to all subcommands automatically.
 #[derive(Debug, Parser)]
 #[command(
-    name = "toolkit",
+    name = "toolkitrs",
     version,
     about = "FFmpeg workflows for common media tasks",
     long_about = "A unified FFmpeg workflow CLI for common media tasks.\n\nSupports single-file conversion, interactive sibling discovery, explicit directory batch processing, and configurable error policies.",
@@ -52,7 +52,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// Available subcommands for the toolkit.
+/// Available subcommands for the toolkitrs.
 ///
 /// Adding a new tool requires adding a variant here and a dispatch arm in commands::run().
 #[derive(Debug, Subcommand)]
