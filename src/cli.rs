@@ -19,7 +19,6 @@ use std::path::PathBuf;
     version,
     about = "FFmpeg workflows for common media tasks",
     long_about = "A unified FFmpeg workflow CLI for common media tasks.\n\nSupports single-file conversion, interactive sibling discovery, explicit directory batch processing, and configurable error policies.",
-    arg_required_else_help = true
 )]
 pub struct Cli {
     /// Print commands and diagnostic output to stderr.
@@ -46,11 +45,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub ffprobe_path: Option<PathBuf>,
 
-    /// The specific media workflow to execute.
+    /// The specific media workflow to execute. Omit to launch the interactive TUI.
     ///
     /// Each variant maps to a dedicated command module under src/commands/.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// Available subcommands for the toolkit.
@@ -69,9 +68,6 @@ pub enum Command {
 
     /// Wrap a video with a companion image; supports interactive MP4 batch discovery.
     Vidwrap(VidwrapArgs),
-
-    /// Launch the interactive terminal UI (ratatui).
-    Tui,
 }
 
 /// Common conversion options shared by batch processing commands.

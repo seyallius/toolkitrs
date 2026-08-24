@@ -1,15 +1,18 @@
-# 🛠️ toolkit
+# 🛠️ toolkitrs
 
-> A unified FFmpeg workflow CLI for common media tasks.
+> A unified FFmpeg workflow CLI and interactive TUI for common media tasks.
 
 A fast, single-binary replacement for mixed PowerShell/Go media scripts. Built with Rust, it provides safe,
-cross-platform media conversion workflows with progress feedback, interactive batch processing, and rich CLI help.
+cross-platform media conversion workflows with progress feedback, interactive batch processing, a beautiful Terminal UI,
+and rich CLI help.
 
 ## ✨ Features
 
+- **Interactive TUI**: A beautiful, keyboard-driven terminal UI for browsing files and running workflows with live
+  progress
 - **Unified CLI**: One binary for all media workflows (`ts2mp4`, `mkv2mp3`, `mp32mp4`, `vidwrap`)
 - **Batch Processing**: Automatic directory scanning with skip/overwrite logic
-- **Interactive Sibling Discovery**: If you provide one file and related files exist nearby, toolkit can ask whether to
+- **Interactive Sibling Discovery**: If you provide one file and related files exist nearby, toolkitrs can ask whether to
   process them too
 - **Error Policies**: Choose whether to stop, skip, or prompt after each file during batch processing
 - **Safe Defaults**: Prevents accidental data loss with explicit `--force` flags
@@ -39,8 +42,8 @@ cargo install toolkitrs
 ### From Source
 
 ```bash
-git clone https://github.com/seyallius/toolkit.git
-cd toolkit
+git clone https://github.com/seyallius/toolkitrs.git
+cd toolkitrs
 cargo install --path .
 ```
 
@@ -51,11 +54,18 @@ cargo install --path .
 
 ## 🚀 Usage
 
+You can use `toolkitrs` in two ways: via the **Interactive TUI** (default) or via **CLI subcommands** for scripting and
+automation.
+
 ```bash
+# Launch the interactive TUI (just run it without arguments!)
+toolkitrs
+
+# Or run a specific CLI workflow
 toolkitrs [OPTIONS] <COMMAND>
 ```
 
-Run help for any command:
+Run help for CLI commands:
 
 ```bash
 toolkitrs --help
@@ -65,20 +75,23 @@ toolkitrs mp32mp4 --help
 toolkitrs vidwrap --help
 ```
 
-### Global Options
+## 🖥️ Interactive Terminal UI (TUI)
 
-| Flag                    | Description                                           |
-|-------------------------|-------------------------------------------------------|
-| `--verbose`             | Print FFmpeg commands and diagnostic output to stderr |
-| `--no-color`            | Disable ANSI color codes and styling                  |
-| `--ffmpeg-path <PATH>`  | Explicit path to ffmpeg executable                    |
-| `--ffprobe-path <PATH>` | Explicit path to ffprobe binary (reserved)            |
-| `-h, --help`            | Print help information                                |
-| `-V, --version`         | Print version information                             |
+If you prefer a visual, keyboard-driven experience, simply run `toolkitrs` without any arguments to launch the interactive
+Terminal UI.
 
-## 🔁 Interactive Batch Processing
+The TUI provides:
 
-For supported commands, if you provide a single input file and toolkit finds compatible sibling files in the same
+- **Workflow Selection**: Choose between `ts2mp4`, `mkv2mp3`, `mp32mp4`, and `vidwrap`.
+- **Visual File Browser**: Navigate your directories and select files using vim-style bindings (`h/j/k/l`).
+- **Live Execution**: Watch real-time `ffmpeg` logs and per-file progress gauges as your batch processes.
+
+> **Note:** The TUI requires an interactive terminal. If run in a CI/CD pipeline or piped to a file, it will safely exit
+> and suggest using the CLI subcommands instead.
+
+## 🔁 Interactive Batch Processing (CLI)
+
+For supported CLI commands, if you provide a single input file and toolkitrs finds compatible sibling files in the same
 directory, it can ask what to do.
 
 Example:
@@ -87,7 +100,7 @@ Example:
 toolkitrs ts2mp4 video.ts
 ```
 
-If the directory contains more `.ts` files, toolkit prompts:
+If the directory contains more `.ts` files, toolkitrs prompts:
 
 ```text
 Found 4 TS files in /videos
@@ -101,7 +114,7 @@ Choice [4]:
 
 The default is option 4: process the whole path, prompting after each file.
 
-When prompting after each file, toolkit asks:
+When prompting after each file, toolkitrs asks:
 
 ```text
 Continue?
