@@ -1,13 +1,11 @@
 # .github/workflows/release-assets.yml
-# Builds and uploads release binaries with standard Rust target triple naming.
-# This naming convention enables automatic discovery by cargo-binstall.
+# Manual-only binary release workflow.
+# Use this when you need binaries WITHOUT publishing to crates.io.
+# Examples: hotfix assets, testing packaging, rebuilding corrupted releases.
 
-name: Build & Release Binaries
+name: Build & Release Binaries (Manual)
 
 on:
-  push:
-    tags:
-      - "v*"
   # Manual fallback: lets you build + release for any existing tag
   # without having to delete and re-push it.
   workflow_dispatch:
@@ -22,7 +20,7 @@ permissions:
 
 jobs:
   build:
-    uses: seyallius/github-workflows/.github/workflows/build-assets.yml@v4
+    uses: seyallius/github-workflows/.github/workflows/build-assets.yml@v0.4.1
     with:
       binary_name: toolkitrs
       # You can also override targets, build_command, etc. if needed.
@@ -33,7 +31,7 @@ jobs:
     uses: seyallius/github-workflows/.github/workflows/release-assets.yml@v4
     with:
       artifact_pattern: toolkitrs*                      # Matches your binary_name used in the build
-      generate_release_notes: true                      # Optional, defaults to true
+      generate_release_notes: false                     # Don't overwrite existing notes
       draft: false                                      # Optional, defaults to false
       prerelease: false                                 # Optional, defaults to false
       tag_name: ${{ inputs.tag || github.ref_name }}    # Pass the manual tag through if provided, otherwise fall back to ref_name
