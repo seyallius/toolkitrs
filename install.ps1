@@ -66,8 +66,9 @@ Move-Item -Path $BinPath.FullName -Destination "$InstallDir\$BinaryName.exe" -Fo
 # Add to PATH if not already there
 $CurrentPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($CurrentPath -notlike "*$InstallDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$CurrentPath;$InstallDir", "User")
-    Write-Host "🔗 Added $InstallDir to user PATH. You may need to restart your terminal."
+    [Environment]::SetEnvironmentVariable("Path", "$CurrentPath;$InstallDir", "User") # Persist to user PATH (for future sessions)
+    $env:Path = "$env:Path;$InstallDir" # Make available in current session immediately
+    Write-Host "🔗 Added $InstallDir to user PATH (available now!)"
 }
 
 # Cleanup

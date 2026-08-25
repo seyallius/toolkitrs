@@ -81,6 +81,46 @@ fi
 
 # ----------------------- Installation -----------------------
 
+# Use /usr/local/bin if writable, otherwise fallback to ~/.local/bin
+if [ -w "/usr/local/bin" ]; then
+    INSTALL_DIR="/usr/local/bin"
+else
+    INSTALL_DIR="$HOME/.local/bin"
+    mkdir -p "$INSTALL_DIR"
+
+    # Add to PATH for current session
+    export PATH="$INSTALL_DIR:$PATH"
+    echo "🔗 Added $INSTALL_DIR to PATH for this session"
+
+    # Suggest adding to profile for persistence
+    echo ""
+    echo "⚠️  To make $BINARY_NAME available in future terminals, add this to your shell profile:"
+    echo ""
+
+    # Detect shell and show appropriate command
+    SHELL_NAME=$(basename "$SHELL")
+    case "$SHELL_NAME" in
+        bash)
+            echo "   echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bashrc"
+            echo "   source ~/.bashrc"
+            ;;
+        zsh)
+            echo "   echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.zshrc"
+            echo "   source ~/.zshrc"
+            ;;
+        fish)
+            echo "   echo 'set -Ux fish_user_paths $INSTALL_DIR \$fish_user_paths' >> ~/.config/fish/config.fish"
+            echo "   source ~/.config/fish/config.fish"
+            ;;
+        *)
+            echo "   export PATH=\"\$PATH:$INSTALL_DIR\""
+            echo ""
+            echo "   Then add the above line to your shell profile (~/.bashrc, ~/.zshrc, etc.)"
+            ;;
+    esac
+    echo ""
+fi
+
 echo "🚀 Installing to $INSTALL_DIR..."
 if [ -w "$INSTALL_DIR" ]; then
     mv "$BIN_PATH" "$INSTALL_DIR/$BINARY_NAME"
