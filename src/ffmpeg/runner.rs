@@ -160,18 +160,25 @@ pub async fn run_async(
     cancel: CancellationToken,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<()> {
+    // Only pipe stderr if we have a channel to read it. Otherwise, null it
+    // to prevent SIGPIPE crashes when ffmpeg writes to a closed pipe.
+    let stderr_cfg = if log_tx.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+
     let mut child = tokio::process::Command::new(binary)
         .args(&args)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(stderr_cfg)
         // Kill the child if this future is dropped (e.g., the task is aborted).
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("spawning {} {}", binary.display(), args.join(" ")))?;
 
     // Optional: stream stderr line-by-line to the log channel.
-    let stderr = child.stderr.take();
-    let log_task = if let (Some(stderr), Some(tx)) = (stderr, log_tx) {
+    let log_task = if let (Some(stderr), Some(tx)) = (child.stderr.take(), log_tx) {
         Some(tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
