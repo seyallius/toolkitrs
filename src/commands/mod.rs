@@ -6,6 +6,7 @@ pub mod mkv2mp3;
 pub mod mp32mp4;
 pub mod ts2mp4;
 pub mod vidwrap;
+pub mod workers;
 
 use crate::{
     cli::{Cli, Command},

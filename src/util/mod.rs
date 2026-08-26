@@ -3,3 +3,4 @@
 pub mod batch;
 pub mod files;
 pub mod output;
+pub mod parallel;

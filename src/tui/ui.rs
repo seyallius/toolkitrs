@@ -167,6 +167,14 @@ fn render_options(f: &mut Frame, app: &App, area: Rect) {
             "Output directory     : {}",
             app.options.output_dir.display()
         ),
+        format!(
+            "Parallelism          : {}",
+            if app.parallel {
+                "Parallel"
+            } else {
+                "Sequential"
+            }
+        ),
         "▶ Start".to_string(),
     ];
 
@@ -216,6 +224,9 @@ fn render_running(f: &mut Frame, app: &App, area: Rect) {
     render_status_list(f, app, chunks[0]);
     render_log(f, app, chunks[1]);
     render_progress(f, app, chunks[2]);
+    if app.show_cleanup_prompt {
+        render_cleanup_popup(f, app, area);
+    }
 }
 
 /// Renders each file with a state icon (pending/running/done/failed).
@@ -316,8 +327,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         }
         Screen::Options => "↑↓ move · ←→ adjust · ⏎ toggle/start · b back · q quit",
         Screen::Running => {
-            if app.running {
-                "please wait…"
+            if app.show_cleanup_prompt {
+                "y remove · n keep"
+            } else if app.running {
+                "c cancel batch · (Ctrl+C quits)"
             } else {
                 "⏎/esc home · q quit"
             }
@@ -325,4 +338,38 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     };
     let footer = Paragraph::new(Span::styled(hints, Style::default().fg(DIM)));
     f.render_widget(footer, area);
+}
+
+/// Renders a centered Yes/No popup for residual file cleanup.
+fn render_cleanup_popup(f: &mut Frame, app: &App, area: Rect) {
+    let n = app.residual_files.len();
+    let text = format!(
+        "Batch cancelled. {n} partial files remain.\n\nRemove them?\n\n  [y] Yes, remove   [n] No, keep"
+    );
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Cleanup "),
+        )
+        .style(Style::default().fg(Color::White));
+
+    // Center the popup in a ~50% wide, ~40% tall rect.
+    let popup_area = centered_rect(60, 40, area);
+    f.render_widget(popup, popup_area);
+}
+
+/// Helper for centering a rect inside `r`.
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ]);
+    let popup_layout = layout.split(r);
+    layout.split(popup_layout[1])[1]
 }

@@ -1,6 +1,7 @@
 //! module prompt - Interactive user prompts with injectable streams.
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 
 /// Decision for what to do when a single video is supplied but sibling videos exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,24 @@ pub enum ContinueChoice {
 
     /// Continue with all remaining videos without asking again.
     YesToAll,
+}
+
+/// User's choice for execution mode when multiple files are queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Process files one at a time (sync sequential).
+    Sequential,
+    /// Process files in parallel using N cores.
+    Parallel,
+}
+
+/// User's choice for residual file cleanup after a canceled batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupChoice {
+    /// Remove all partial output files from cancelled tasks.
+    Remove,
+    /// Keep them as-is.
+    Keep,
 }
 
 /// Parse a yes/no response, falling back to `default` for unknown input.
@@ -234,6 +253,89 @@ pub fn continue_to_next<R: BufRead, W: Write>(
     input.read_line(&mut line)?;
 
     Ok(parse_continue(&line, DEFAULT))
+}
+
+/// Asks the user whether to run in parallel or sequential mode.
+///
+/// Non-interactive fallback: returns `Sequential` (safer for resource usage).
+pub fn execution_mode_choice<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    file_count: usize,
+    cores: usize,
+) -> io::Result<ExecutionMode> {
+    if !io::stdin().is_terminal() {
+        writeln!(
+            output,
+            "Found {file_count} files. Non-interactive mode: defaulting to sequential."
+        )?;
+        return Ok(ExecutionMode::Sequential);
+    }
+
+    writeln!(output, "Found {file_count} files to process.")?;
+    writeln!(output, "How would you like to run them?")?;
+    writeln!(output, "  1. Parallel (using {cores} cores)")?;
+    writeln!(output, "  2. Sequential (one by one)")?;
+    write!(output, "Choice [1]: ")?;
+    output.flush()?;
+
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+
+    Ok(match line.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "parallel" => ExecutionMode::Parallel,
+        "2" | "sequential" | "seq" => ExecutionMode::Sequential,
+        _ => ExecutionMode::Parallel,
+    })
+}
+
+/// Asks the user whether to remove residual partial output files after a
+/// canceled batch.
+///
+/// Non-interactive fallback: keeps the files (no destructive default).
+pub fn cleanup_residual_choice<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    residual_files: &[PathBuf],
+) -> io::Result<CleanupChoice> {
+    if residual_files.is_empty() {
+        return Ok(CleanupChoice::Keep);
+    }
+
+    if !io::stdin().is_terminal() {
+        writeln!(
+            output,
+            "Cancelled batch left {} partial files. Keeping them.",
+            residual_files.len()
+        )?;
+        return Ok(CleanupChoice::Keep);
+    }
+
+    writeln!(
+        output,
+        "Cancelled batch left {} partial files:",
+        residual_files.len()
+    )?;
+    for path in residual_files.iter().take(10) {
+        writeln!(output, "  • {}", path.display())?;
+    }
+    if residual_files.len() > 10 {
+        writeln!(output, "  ... and {} more", residual_files.len() - 10)?;
+    }
+    writeln!(output, "Remove these files?")?;
+    writeln!(output, "  1. Yes, remove them")?;
+    writeln!(output, "  2. No, keep them")?;
+    write!(output, "Choice [1]: ")?;
+    output.flush()?;
+
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+
+    Ok(match line.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "y" | "yes" | "remove" => CleanupChoice::Remove,
+        "2" | "n" | "no" | "keep" => CleanupChoice::Keep,
+        _ => CleanupChoice::Remove,
+    })
 }
 
 #[cfg(test)]

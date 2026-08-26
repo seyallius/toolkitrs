@@ -10,9 +10,10 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::Sender,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Number of selectable rows on the options screen.
-const OPTIONS_ROWS: usize = 5;
+const OPTIONS_ROWS: usize = 6;
 /// Spinner animation frames (braille dots).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -120,6 +121,14 @@ pub struct App {
     pub spinner_frame: usize,
     /// Resolved ffmpeg binary path.
     pub ffmpeg_path: PathBuf,
+    /// Whether to run in parallel (true) or sequentially (false).
+    pub parallel: bool,
+    /// Cancellation token for the current batch (None when idle).
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// Residual files left over after a canceled batch (for cleanup prompt).
+    pub residual_files: Vec<PathBuf>,
+    /// Pending cleanup decision after cancellation.
+    pub show_cleanup_prompt: bool,
 }
 impl App {
     /// Creates a fresh app state starting on the home screen.
@@ -144,6 +153,10 @@ impl App {
             should_quit: false,
             spinner_frame: 0,
             ffmpeg_path: ffmpeg_path.unwrap_or_else(|| PathBuf::from("ffmpeg")),
+            parallel: true,
+            cancel_token: None,
+            residual_files: Vec::new(),
+            show_cleanup_prompt: false,
         }
     }
 
@@ -194,6 +207,14 @@ impl App {
         // Global quit: Ctrl+C always exits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+        // 'c' cancels the running batch.
+        if self.screen == Screen::Running && self.running && key.code == KeyCode::Char('c') {
+            if let Some(token) = &self.cancel_token {
+                token.cancel();
+                self.push_log("⊙ Cancellation requested...".into());
+            }
             return;
         }
         match self.screen {
@@ -297,6 +318,14 @@ impl App {
 
     /// Running screen: mostly read-only; Enter/Esc after finishing goes home.
     fn handle_running(&mut self, key: KeyEvent) {
+        if self.show_cleanup_prompt {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => self.handle_cleanup_choice(true),
+                KeyCode::Char('n') => self.handle_cleanup_choice(false),
+                _ => {}
+            }
+            return;
+        }
         if self.running {
             return; // ignore input mid-run for v1
         }
@@ -399,6 +428,10 @@ impl App {
                 let next = self.options.cover_size as i32 + delta * 100;
                 self.options.cover_size = next.clamp(100, 2000) as u32;
             }
+            4 => {
+                // parallelism toggle row (left/right flips it)
+                self.parallel = !self.parallel;
+            }
             _ => {}
         }
     }
@@ -407,9 +440,31 @@ impl App {
     fn activate_current(&mut self, tx: &Sender<AppEvent>) {
         match self.options_index {
             0 => self.options.force = !self.options.force,
-            4 => self.start_run(tx), // "Start" row
+            4 => self.parallel = !self.parallel,
+            5 => self.start_run(tx), // "Start" row moved to index 5
             _ => {}
         }
+    }
+
+    /// User chose to remove (or keep) residual files after a cancel.
+    pub fn handle_cleanup_choice(&mut self, remove: bool) {
+        if remove {
+            for p in &self.residual_files {
+                let _ = fs::remove_file(p);
+            }
+            self.push_log(format!(
+                "✔ Removed {} residual files.",
+                self.residual_files.len()
+            ));
+        } else {
+            self.push_log(format!(
+                "⊗ Kept {} residual files.",
+                self.residual_files.len()
+            ));
+        }
+        self.residual_files.clear();
+        self.show_cleanup_prompt = false;
+        // Stay on Running screen showing the final state; user presses Enter to go home.
     }
 
     /// Builds the file queue and spawns the background worker.
@@ -419,6 +474,9 @@ impl App {
         };
         let mut files: Vec<PathBuf> = self.selected_files.iter().cloned().collect();
         files.sort(); // deterministic order
+
+        let cancel = CancellationToken::new();
+        self.cancel_token = Some(cancel.clone());
 
         self.file_statuses = files
             .iter()
@@ -430,6 +488,8 @@ impl App {
         self.log.clear();
         self.running = true;
         self.finished = false;
+        self.residual_files.clear();
+        self.show_cleanup_prompt = false;
         self.screen = Screen::Running;
 
         runner::spawn_worker(
@@ -438,6 +498,8 @@ impl App {
             workflow,
             files,
             self.options.clone(),
+            self.parallel,
+            cancel,
         );
     }
 }

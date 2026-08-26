@@ -100,6 +100,18 @@ fn event_loop(
             Ok(AppEvent::FileDone(i, ok)) => app.file_done(i, ok),
             Ok(AppEvent::AllDone { succeeded, failed }) => app.all_done(succeeded, failed),
             Ok(AppEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => app.tick(),
+            Ok(AppEvent::CancelAll) => {
+                if let Some(token) = &app.cancel_token {
+                    token.cancel();
+                }
+            }
+            Ok(AppEvent::CancelledWithResidual(files)) => {
+                app.running = false;
+                app.finished = true;
+                app.residual_files = files;
+                app.show_cleanup_prompt = true;
+                app.cancel_token = None;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }

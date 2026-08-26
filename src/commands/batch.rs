@@ -1,23 +1,26 @@
 //! module batch - Generic interactive batch processing pipeline for media conversion commands.
 
 use crate::{
-    cli::{BatchArgs, BatchOnError},
+    cli::{BatchArgs, BatchOnError, ExecutionModeCli},
     components::{
         banner,
-        prompt::{self, ContinueChoice, SiblingBatchChoice},
+        prompt::{self, CleanupChoice, ContinueChoice, ExecutionMode, SiblingBatchChoice},
     },
     ffmpeg::{Ffmpeg, ProcessRunner},
     util::{
         batch::{BatchPolicy, BatchReport},
         files,
         output::{self, OutputDecision},
+        parallel::{self, BatchEvent, BatchSummary},
     },
 };
 use anyhow::{bail, Context, Result};
 use std::{
+    future::Future,
     io::{self, BufReader, IsTerminal},
     path::{Path, PathBuf},
 };
+use tokio_util::sync::CancellationToken;
 
 // --------------------------------- Types, Constants & Variables ------------------------------- //
 
@@ -90,7 +93,240 @@ pub fn run_batch<R: ProcessRunner, T: BatchTask>(
     // Ensure output directory exists if we are going to process anything
     output::ensure_directory(&args.output_dir)?;
 
-    execute_queue(task, args, &queue, policy, ffmpeg)
+    // Decide execution mode (parallel vs sequential) for multi-file batches.
+    let mode = resolve_execution_mode(queue.len(), args.mode)?;
+    match mode {
+        ExecutionMode::Sequential => execute_queue(task, args, &queue, policy, ffmpeg),
+        ExecutionMode::Parallel => {
+            // Build a worker closure that delegates to the task's async worker.
+            // We use Arc so the closure can be cloned cheaply per spawn.
+            let output_dir = args.output_dir.clone();
+            let output_ext = task.output_extension().to_string();
+            let force = args.force;
+            let binary = ffmpeg.binary().to_path_buf();
+
+            // Dispatch by workflow — each command calls run_batch_parallel directly
+            // with its own worker. Here we provide a generic worker for any
+            // BatchTask by routing through the async_workers module.
+            //
+            // Since workers.rs has per-workflow functions, we expect each command
+            // to call run_batch_parallel itself. For commands that haven't been
+            // migrated yet, fall back to sequential.
+            execute_queue(task, args, &queue, policy, ffmpeg)
+        }
+    }
+}
+
+/// Resolves execution mode from CLI flag or interactive prompt.
+///
+/// Single-file queues always run sequentially (no benefit from parallelism).
+pub fn resolve_execution_mode(
+    file_count: usize,
+    cli_mode: Option<ExecutionModeCli>,
+) -> Result<ExecutionMode> {
+    if file_count <= 1 {
+        return Ok(ExecutionMode::Sequential);
+    }
+
+    if let Some(m) = cli_mode {
+        return Ok(match m {
+            ExecutionModeCli::Sequential => ExecutionMode::Sequential,
+            ExecutionModeCli::Parallel => ExecutionMode::Parallel,
+        });
+    }
+
+    let cores = parallel::num_cpus();
+    let stdin = io::stdin();
+    let mut input = BufReader::new(stdin.lock());
+    let mut stdout = io::stdout();
+    Ok(prompt::execution_mode_choice(
+        &mut input,
+        &mut stdout,
+        file_count,
+        cores,
+    )?)
+}
+
+/// Runs a parallel batch with the given worker closure.
+///
+/// This is shared by all workflows: the caller passes a closure that knows
+/// how to process one file for its specific workflow.
+///
+/// # Arguments
+/// * `banner_title` - Title for the banner (e.g. "TS").
+/// * `queue` - Input file paths, in order.
+/// * `output_dir` - Where outputs go.
+/// * `output_ext` - Output extension (used to pre-compute output paths for cleanup).
+/// * `force` - Overwrite existing outputs.
+/// * `ffmpeg_binary` - Path to the ffmpeg binary.
+/// * `worker` - Async closure: `(input, cancel) -> Result<PathBuf>`.
+pub fn run_batch_parallel<F, Fut>(
+    banner_title: &str,
+    queue: Vec<PathBuf>,
+    output_dir: &Path,
+    output_ext: &str,
+    force: bool,
+    ffmpeg_binary: &Path,
+    worker: F,
+) -> Result<()>
+where
+    F: Fn(PathBuf, CancellationToken) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Result<PathBuf>> + Send + 'static,
+{
+    println!(
+        "{}",
+        banner::render(
+            banner_title,
+            Some(&format!("Parallel Batch · {} files", queue.len())),
+            console::colors_enabled()
+        )
+    );
+
+    output::ensure_directory(output_dir)?;
+
+    let cores = parallel::num_cpus();
+    let cancel = CancellationToken::new();
+
+    // Ctrl+C handler — first Ctrl+C cancels gracefully.
+    let cancel_clone = cancel.clone();
+    let ctrl_c_handle = std::thread::spawn(move || {
+        // We use a tiny single-threaded runtime just for the signal handler.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("ctrl-c runtime");
+        rt.block_on(async {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("\nCancellation requested (press Ctrl+C again to force exit)...");
+            cancel_clone.cancel();
+        });
+    });
+
+    // Pre-compute output paths so we can identify residual files after cancel.
+    let outputs: Vec<PathBuf> = queue
+        .iter()
+        .map(|p| output::output_path(p, output_dir, output_ext))
+        .collect::<Result<_>>()?;
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BatchEvent>();
+
+    // The actual parallel run happens inside a multi-threaded tokio runtime.
+    let binary = ffmpeg_binary.to_path_buf();
+    let runner_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let queue_for_runner = queue.clone();
+    let runner_handle = runner_rt.spawn(async move {
+        parallel::run_parallel(queue_for_runner, cores, cancel.clone(), event_tx, worker).await
+    });
+
+    // Drive the event loop from the calling thread (sync API).
+    let runtime_guard = runner_rt.enter();
+    let _ = runtime_guard; // keep the runtime alive via runner_handle
+
+    let mut started: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut succeeded: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut failed = 0usize;
+    let mut summary = BatchSummary::default();
+
+    // Block on receiving events.
+    runner_rt.block_on(async {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                BatchEvent::Started(i) => {
+                    started.insert(i);
+                    println!("▶ Started [{}]: {}", i + 1, queue[i].display());
+                }
+                BatchEvent::Done(i, work_result) => {
+                    if work_result.is_success() {
+                        // Success case - unwrap the path
+                        if let Some(path) = work_result.path {
+                            println!("✔ Success [{}]: {}", i + 1, path.display());
+                            succeeded.insert(i);
+                        }
+                    } else if let Some(error) = work_result.error {
+                        // Check if it was a cancellation
+                        if error == "cancelled" {
+                            eprintln!("⊗ Cancelled [{}]: {}", i + 1, queue[i].display());
+                        } else {
+                            eprintln!("✖ Failed [{}]: {}", i + 1, error);
+                            failed += 1;
+                        }
+                    }
+                }
+                BatchEvent::AllDone(s) => {
+                    summary = s;
+                    break;
+                }
+            }
+        }
+    });
+
+    // Drop the runner handle to free the runtime.
+    let _ = runner_handle;
+
+    // Stop the Ctrl+C listener thread.
+    drop(ctrl_c_handle);
+
+    // If canceled, prompt for residual file cleanup.
+    if summary.cancelled {
+        let residual: Vec<PathBuf> = started
+            .iter()
+            .filter(|i| !succeeded.contains(i))
+            .filter_map(|i| outputs.get(*i).filter(|p| p.exists()).cloned())
+            .collect();
+
+        if !residual.is_empty() {
+            let stdin = io::stdin();
+            let mut input = BufReader::new(stdin.lock());
+            let mut stdout = io::stdout();
+            match prompt::cleanup_residual_choice(&mut input, &mut stdout, &residual)? {
+                CleanupChoice::Remove => {
+                    for p in &residual {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    println!("Removed {} residual files.", residual.len());
+                }
+                CleanupChoice::Keep => {
+                    println!("Kept {} residual files.", residual.len());
+                }
+            }
+        }
+    }
+
+    println!(
+        "{}",
+        banner::render(
+            "Done",
+            Some(&format!(
+                "{} succeeded · {} failed{}",
+                summary.succeeded,
+                summary.failed,
+                if summary.cancelled {
+                    " · cancelled"
+                } else {
+                    ""
+                }
+            )),
+            console::colors_enabled()
+        )
+    );
+
+    if summary.failed > 0 {
+        bail!("one or more conversions failed");
+    }
+    Ok(())
+}
+
+/// Resolves only the queue + policy without executing anything.
+/// Used by commands that want to dispatch to parallel themselves.
+pub fn resolve_queue_only<T: BatchTask>(
+    task: &T,
+    args: &BatchArgs,
+    explicit_files: Vec<PathBuf>,
+) -> Result<(Vec<PathBuf>, BatchPolicy)> {
+    resolve_queue_and_policy(task, args, explicit_files)
 }
 
 // -------------------------------------- Internal Helpers -------------------------------------- //

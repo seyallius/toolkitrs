@@ -20,6 +20,9 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 tempfile = "3.12"
 thiserror = "2.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "process", "sync", "signal", "io-util", "time"] }
+tokio-util = "0.7"
+num_cpus = "1.16"
 
 [dev-dependencies]
 assert_cmd = "2.0"

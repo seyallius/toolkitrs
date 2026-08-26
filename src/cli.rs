@@ -18,7 +18,7 @@ use std::path::PathBuf;
     name = "toolkitrs",
     version,
     about = "FFmpeg workflows for common media tasks",
-    long_about = "A unified FFmpeg workflow CLI for common media tasks.\n\nSupports single-file conversion, interactive sibling discovery, explicit directory batch processing, and configurable error policies.",
+    long_about = "A unified FFmpeg workflow CLI for common media tasks.\n\nSupports single-file conversion, interactive sibling discovery, explicit directory batch processing, and configurable error policies."
 )]
 pub struct Cli {
     /// Print commands and diagnostic output to stderr.
@@ -81,25 +81,21 @@ pub struct BatchArgs {
     /// Created automatically if it does not exist.
     #[arg(long, default_value = "out", value_name = "DIR")]
     pub output_dir: PathBuf,
-
     /// Overwrite existing output files instead of skipping them.
     ///
     /// By default, files with matching output paths are skipped to prevent accidental data loss.
     #[arg(long)]
     pub force: bool,
-
     /// Process all matching files in the current directory.
     ///
     /// Use --input-dir to scan a different directory.
     #[arg(long)]
     pub batch: bool,
-
     /// Directory to scan for input files.
     ///
     /// This implies batch processing.
     #[arg(long, value_name = "DIR")]
     pub input_dir: Option<PathBuf>,
-
     /// Error policy for explicit batch mode.
     ///
     /// stop: abort on first error and report.
@@ -107,6 +103,12 @@ pub struct BatchArgs {
     /// prompt: ask whether to continue after each processed file.
     #[arg(long, value_enum, value_name = "POLICY")]
     pub on_error: Option<BatchOnError>,
+    /// Execution mode for multi-file batches.
+    ///
+    /// If omitted, interactive terminals prompt the user. Non-interactive
+    /// terminals default to sequential.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub mode: Option<ExecutionModeCli>,
 }
 
 /// Error policy for explicit directory batch processing.
@@ -120,4 +122,13 @@ pub enum BatchOnError {
 
     /// Prompt after each file.
     Prompt,
+}
+
+/// Execution strategy for batch processing.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExecutionModeCli {
+    /// Sequential (one by one).
+    Sequential,
+    /// Parallel using all available cores.
+    Parallel,
 }

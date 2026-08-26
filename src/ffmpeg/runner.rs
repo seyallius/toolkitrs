@@ -2,9 +2,14 @@
 //! Provides structured output and error types for deterministic command testing
 //! and clean error propagation throughout the CLI pipeline.
 
-use anyhow::{bail, Result};
-use std::{path::PathBuf, process::Command};
+use anyhow::{bail, Context, Result};
+use std::{
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
 
 // -------------------------------------------- Types ------------------------------------------- //
 
@@ -123,6 +128,81 @@ impl<R: ProcessRunner> Ffmpeg<R> {
                 stderr: output.stderr
             });
         }
+    }
+}
+impl<R> Ffmpeg<R> {
+    /// Returns the ffmpeg binary path that this facade will invoke.
+    pub fn binary(&self) -> &Path {
+        &self.binary
+    }
+}
+
+/// Runs an FFmpeg command asynchronously, with cancellation support.
+///
+/// This is the cancellable counterpart to [`Ffmpeg::run`]. It is used by the
+/// parallel batch executor so long-running ffmpeg processes can be killed
+/// gracefully when the user requests cancellation.
+///
+/// # Arguments
+/// * `binary` - Path to the ffmpeg executable.
+/// * `args` - FFmpeg arguments (typically built via [`crate::ffmpeg::args`]).
+/// * `cancel` - Cancellation token. When triggered, the child process is killed.
+/// * `log_tx` - Optional channel to receive each line of ffmpeg's stderr.
+///   Used by the TUI to show live logs.
+///
+/// # Errors
+/// - If the process cannot be spawned.
+/// - If `cancel` fires: returns an error with the message `"canceled"`.
+/// - If the process exits with a non-zero status.
+pub async fn run_async(
+    binary: &Path,
+    args: Vec<String>,
+    cancel: CancellationToken,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<()> {
+    let mut child = tokio::process::Command::new(binary)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        // Kill the child if this future is dropped (e.g., the task is aborted).
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("spawning {} {}", binary.display(), args.join(" ")))?;
+
+    // Optional: stream stderr line-by-line to the log channel.
+    let stderr = child.stderr.take();
+    let log_task = if let (Some(stderr), Some(tx)) = (stderr, log_tx) {
+        Some(tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx.send(line);
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Wait for the process to finish — or for cancellation to fire.
+    let result = tokio::select! {
+        r = child.wait() => r,
+        _ = cancel.cancelled() => {
+            // Kill the child to free up system resources.
+            let _ = child.kill().await;
+            if let Some(task) = log_task {
+                let _ = task.await;
+            }
+            bail!("cancelled");
+        }
+    };
+
+    if let Some(task) = log_task {
+        let _ = task.await;
+    }
+
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => bail!("ffmpeg exited with {status}"),
+        Err(e) => Err(e.into()),
     }
 }
 

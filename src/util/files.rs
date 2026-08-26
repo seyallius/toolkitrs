@@ -223,6 +223,16 @@ pub fn temp_path(prefix: &str, suffix: &str) -> Result<PathBuf> {
     Ok(env::temp_dir().join(filename))
 }
 
+/// Computes the vidwrap output path next to the source video.
+pub fn output_path_for_video_with_image(video: &Path) -> Result<PathBuf> {
+    let dir = video.parent().context("video has no parent")?;
+    let stem = video
+        .file_stem()
+        .context("video has no stem")?
+        .to_string_lossy();
+    Ok(dir.join(format!("{stem}_with_image.mp4")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,8 @@
 //! module mp32mp4 - Convert MP3 files to MP4 videos with optional cover art.
 //! Converts MP3 files to MP4 videos with optional cover art using the batch pipeline.
 
+use crate::commands::workers;
+use crate::util::output;
 use crate::{
     cli::BatchArgs,
     commands::batch::{run_batch, BatchTask, FileOutcome},
@@ -13,7 +15,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-
 // --------------------------------- Types, Constants & Variables ------------------------------- //
 
 /// Extension for MP3 audio files.
@@ -78,12 +79,70 @@ struct Mp3ToMp4Task {
 
 /// Runs the MP3 to MP4 conversion using the generic batch pipeline.
 pub fn run<R: ProcessRunner>(args_cli: Mp32mp4Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
+    use crate::commands::batch::{
+        resolve_execution_mode, resolve_queue_only, run_batch, run_batch_parallel,
+    };
+    use crate::components::prompt::ExecutionMode;
+
     let task = Mp3ToMp4Task {
         bitrate: args_cli.bitrate,
         force: args_cli.batch.force,
         no_cover_fallback: args_cli.no_cover_fallback,
     };
-    run_batch(&task, &args_cli.batch, args_cli.files, ffmpeg)
+    let (queue, _) = resolve_queue_only(&task, &args_cli.batch, args_cli.files.clone())?;
+
+    if queue.is_empty() {
+        println!(
+            "{}",
+            crate::components::banner::render(
+                "MP3",
+                Some("Batch Processing"),
+                console::colors_enabled()
+            )
+        );
+        println!("No MP3 files found to process.");
+        return Ok(());
+    }
+
+    let mode = resolve_execution_mode(queue.len(), args_cli.batch.mode)?;
+
+    match mode {
+        ExecutionMode::Sequential => run_batch(&task, &args_cli.batch, args_cli.files, ffmpeg),
+        ExecutionMode::Parallel => {
+            let bitrate = args_cli.bitrate;
+            let force = args_cli.batch.force;
+            let no_cover_fallback = args_cli.no_cover_fallback;
+            let output_dir = args_cli.batch.output_dir.clone();
+            let binary = ffmpeg.binary().to_path_buf();
+
+            run_batch_parallel("MP3", queue, &output_dir, "mp4", force, &binary, {
+                let output_dir = output_dir.clone(); // Clone for the closure
+                let binary = binary.clone(); // Clone for the closure
+                let force = force; // Copy (bool is Copy)
+
+                move |input, cancel| {
+                    let out = output::output_path(&input, &output_dir, "mp4")
+                        .unwrap_or_else(|_| input.with_extension("mp4"));
+                    let binary = binary.clone();
+                    async move {
+                        if out.exists() && !force {
+                            return Ok(out);
+                        }
+                        workers::mp32mp4(
+                            input,
+                            out,
+                            bitrate,
+                            force,
+                            no_cover_fallback,
+                            &binary,
+                            cancel,
+                        )
+                        .await
+                    }
+                }
+            })
+        }
+    }
 }
 
 // -------------------------------------- Internal Helpers -------------------------------------- //
