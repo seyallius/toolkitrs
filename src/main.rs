@@ -6,6 +6,7 @@ mod components;
 mod ffmpeg;
 mod tui;
 mod util;
+mod workflow;
 
 use anyhow::Result;
 use clap::Parser;

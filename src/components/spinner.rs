@@ -233,14 +233,6 @@ impl Spinner {
 
     /// Stops the spinner and waits for the thread to finish.
     pub fn stop(mut self) {
-        self.shutdown();
-    }
-
-    /// Signals the render thread to stop and joins it.
-    ///
-    /// Shared by [`Spinner::stop`] and the `Drop` impl so both paths tear
-    /// down exactly the same way.
-    fn shutdown(&mut self) {
         self.stop_signal.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -249,7 +241,10 @@ impl Spinner {
 }
 impl Drop for Spinner {
     fn drop(&mut self) {
-        self.shutdown();
+        self.stop_signal.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 

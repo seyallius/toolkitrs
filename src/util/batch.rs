@@ -7,6 +7,8 @@ use std::{
     path::PathBuf,
 };
 
+// ------------------------------------------ Types & Impls ------------------------------------- //
+
 /// Policy controlling how a batch reacts to errors and prompts.
 ///
 /// This is intentionally small and command-agnostic so it can be reused by

@@ -18,15 +18,11 @@ pub enum OutputDecision {
 // ----------------------------------------- Public API ----------------------------------------- //
 
 /// Computes `output_dir/<input-stem>.<extension>` without string path manipulation.
-///
-/// The extension is appended to the full stem (not swapped via
-/// `with_extension`), so dotted names like `a.b.mkv` keep their stem.
 pub fn output_path(input: &Path, output_dir: &Path, extension: &str) -> Result<PathBuf> {
     let stem = input.file_stem().context("input has no file stem")?;
-    let mut name = stem.to_os_string();
-    name.push(".");
-    name.push(extension.trim_start_matches('.'));
-    Ok(output_dir.join(name))
+    Ok(output_dir
+        .join(stem)
+        .with_extension(extension.trim_start_matches('.')))
 }
 
 /// Determines whether to process or skip based on file existence and `force` flag.

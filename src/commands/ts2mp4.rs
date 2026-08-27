@@ -3,31 +3,16 @@
 
 use crate::{
     cli::BatchArgs,
-    commands::{
-        batch::{
-            self, resolve_execution_mode, run_parallel_console, run_sequential, BatchTask,
-            FileOutcome,
-        },
-        workers,
-    },
-    components::prompt::ExecutionMode,
+    commands::batch::{run_batch, BatchFuture, BatchTask, FileOutcome},
     ffmpeg::{args, Ffmpeg, ProcessRunner},
-    util::output,
+    workflow::{Workflow, WorkflowOptions},
 };
 use anyhow::Result;
 use clap::Args;
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
-// --------------------------------- Types, Constants & Variables ------------------------------- //
-
-/// Extension for transport stream files.
-const TS_EXT: &str = "ts";
-
-/// Extension for MP4 files.
-const MP4_EXT: &str = "mp4";
-
-/// Human readable name for TS files.
-const FILE_TYPE_NAME: &str = "TS";
+// ------------------------------------------ Types & Impls ------------------------------------- //
 
 /// Arguments for the `ts2mp4` subcommand.
 #[derive(Debug, Args)]
@@ -49,21 +34,32 @@ pub struct Ts2mp4Args {
 }
 
 /// Task definition for TS to MP4 remuxing.
+#[derive(Debug, Clone, Copy)]
 struct Ts2Mp4Task {
     /// Whether to force overwrite existing files.
     force: bool,
 }
+
+impl Ts2Mp4Task {
+    /// Returns the shared workflow execution settings for this task.
+    fn workflow_options(self) -> WorkflowOptions {
+        WorkflowOptions {
+            force: self.force,
+            ..WorkflowOptions::default()
+        }
+    }
+}
 impl BatchTask for Ts2Mp4Task {
     fn input_extension(&self) -> &str {
-        TS_EXT
+        Workflow::Ts2Mp4.input_extension()
     }
 
     fn output_extension(&self) -> &str {
-        MP4_EXT
+        Workflow::Ts2Mp4.output_extension()
     }
 
     fn file_type_name(&self) -> &str {
-        FILE_TYPE_NAME
+        Workflow::Ts2Mp4.file_type_name()
     }
 
     fn process_file<R: ProcessRunner>(
@@ -75,36 +71,29 @@ impl BatchTask for Ts2Mp4Task {
         ffmpeg.run(args::remux_copy(input, output, self.force))?;
         Ok(FileOutcome::Success)
     }
+
+    fn process_file_async(
+        &self,
+        input: PathBuf,
+        output: PathBuf,
+        ffmpeg_binary: PathBuf,
+        cancel: CancellationToken,
+    ) -> BatchFuture {
+        let options = self.workflow_options();
+        Box::pin(async move {
+            Workflow::Ts2Mp4
+                .run_async(input, output, &options, &ffmpeg_binary, cancel, None)
+                .await
+        })
+    }
 }
 
 // ----------------------------------------- Public API ----------------------------------------- //
 
-/// Runs the TS → MP4 conversion using the generic batch pipeline.
-///
-/// The queue and error policy are resolved once, then dispatched to either
-/// the sequential or the parallel runner.
+/// Runs the TS to MP4 conversion using the generic batch pipeline.
 pub fn run<R: ProcessRunner>(args_cli: Ts2mp4Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
     let task = Ts2Mp4Task {
         force: args_cli.batch.force,
     };
-
-    // One resolution pass: queue + error policy (may prompt for siblings).
-    let (queue, policy) = batch::resolve_queue(&task, &args_cli.batch, args_cli.files.clone())?;
-
-    if queue.is_empty() {
-        return batch::report_empty_queue(FILE_TYPE_NAME);
-    }
-
-    match resolve_execution_mode(queue.len(), args_cli.batch.mode)? {
-        ExecutionMode::Sequential => run_sequential(&task, &args_cli.batch, queue, policy, ffmpeg),
-        ExecutionMode::Parallel => {
-            output::ensure_directory(&args_cli.batch.output_dir)?;
-            let job = workers::ts2mp4_job(
-                &args_cli.batch.output_dir,
-                args_cli.batch.force,
-                ffmpeg.binary(),
-            );
-            run_parallel_console(FILE_TYPE_NAME, queue, job)
-        }
-    }
+    run_batch(&task, &args_cli.batch, args_cli.files, ffmpeg)
 }

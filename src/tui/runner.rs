@@ -1,33 +1,38 @@
-//! module runner - Background ffmpeg execution that reports progress into the TUI.
+//! module runner - Background workflow execution for the TUI.
 //!
-//! This intentionally does NOT reuse the blocking `RealRunner`, because a TUI
-//! needs incremental progress. Instead it reuses the shared [`FileJob`]
-//! implementations from `commands::workers` — the real domain logic — runs
-//! them on the parallel executor, and forwards every batch event to the UI
-//! thread, which owns all rendering.
+//! The TUI needs non-blocking batch execution so the interface can keep
+//! repainting while files are processed. This module bridges the shared
+//! workflow domain logic into TUI-friendly `AppEvent` messages.
 
 use crate::{
-    commands::workers,
-    tui::{app::RunOptions, event::AppEvent, workflow::Workflow},
-    util::{
-        output,
-        parallel::{self, BatchEvent, FileJob, WorkOutcome},
-    },
+    tui::{app::RunOptions, event::AppEvent},
+    util::parallel::{self, BatchEvent, FailurePolicy, WorkResult},
+    workflow::{Workflow, WorkflowOptions},
 };
 use std::{
-    path::{Path, PathBuf},
-    sync::{mpsc::Sender, Arc},
+    collections::HashSet,
+    path::PathBuf,
+    sync::mpsc::Sender,
     thread::{self, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
+
+// ---------------------------------------------- Types ----------------------------------------- //
+
+/// Tracks batch progress so the TUI can surface residual files after cancellation.
+#[derive(Debug, Default)]
+struct ParallelProgress {
+    /// Indices that started processing.
+    started: HashSet<usize>,
+    /// Indices that finished successfully.
+    succeeded: HashSet<usize>,
+}
 
 // ----------------------------------------- Public API ----------------------------------------- //
 
 /// Spawns a worker thread that processes files (sequentially or in parallel).
 ///
-/// Emits `FileStarted`, `FileDone`, `Log`, and finally `AllDone` events.
-/// After a cancelled batch with leftovers, it emits `CancelledWithResidual`
-/// so the UI can offer cleanup.
+/// Emits `FileStarted`, `Log`, `FileDone`, and finally `AllDone` events.
 pub fn spawn_worker(
     tx: Sender<AppEvent>,
     ffmpeg_path: PathBuf,
@@ -38,87 +43,162 @@ pub fn spawn_worker(
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let total = files.len();
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = tx.send(AppEvent::Log(format!("✗ Failed to start runtime: {error}")));
+                let _ = tx.send(AppEvent::AllDone {
+                    succeeded: 0,
+                    failed: files.len(),
+                });
+                return;
+            }
+        };
+
+        let workflow_options = workflow_options(&options);
+        if workflow.uses_output_dir() {
+            if let Err(error) = std::fs::create_dir_all(&workflow_options.output_dir) {
+                let _ = tx.send(AppEvent::Log(format!("✗ {error}")));
+            }
+        }
+
         let concurrency = if parallel_mode {
             parallel::num_cpus()
         } else {
             1
         };
 
-        // Ensure the output directory exists for workflows that use it.
-        if workflow != Workflow::Vidwrap {
-            if let Err(e) = output::ensure_directory(&options.output_dir) {
-                let _ = tx.send(AppEvent::Log(format!("✗ {e}")));
-            }
-        }
+        runtime.block_on(async move {
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BatchEvent>();
+            let worker = build_worker(workflow, workflow_options.clone(), ffmpeg_path);
+            let runner_task = tokio::spawn(parallel::run_parallel(
+                files.clone(),
+                concurrency,
+                cancel,
+                FailurePolicy::Continue,
+                event_tx,
+                worker,
+            ));
 
-        let job = build_job(workflow, &options, &ffmpeg_path);
-        let run = parallel::run_blocking(files, concurrency, cancel, job, |event| {
-            forward_event(&tx, event);
-        });
+            let (progress, failed, summary) = collect_events(&tx, &mut event_rx).await;
 
-        match run {
-            Ok(run) => {
-                if run.summary.cancelled && !run.residual_files.is_empty() {
-                    let _ = tx.send(AppEvent::CancelledWithResidual(run.residual_files));
+            let _ = tx.send(AppEvent::AllDone {
+                succeeded: summary.succeeded,
+                failed: summary.failed,
+            });
+
+            if summary.stopped_early() {
+                let residual = residual_files(workflow, &files, &workflow_options, &progress);
+                if !residual.is_empty() {
+                    let _ = tx.send(AppEvent::CancelledWithResidual(residual));
                 }
             }
-            Err(e) => {
-                let _ = tx.send(AppEvent::Log(format!("✗ {e}")));
-                let _ = tx.send(AppEvent::AllDone {
-                    succeeded: 0,
-                    failed: total,
-                });
+
+            if failed > 0 {
+                let _ = tx.send(AppEvent::Log(format!("✗ {failed} workflow tasks failed.")));
             }
-        }
+
+            let _ = runner_task.await;
+        });
     })
 }
 
 // -------------------------------------- Internal Helpers -------------------------------------- //
 
-/// Translates batch events into TUI events.
-fn forward_event(tx: &Sender<AppEvent>, event: BatchEvent) {
-    match event {
-        BatchEvent::Started(index) => {
-            let _ = tx.send(AppEvent::FileStarted(index));
-        }
-        BatchEvent::Done(index, WorkOutcome::Success(_)) => {
-            let _ = tx.send(AppEvent::FileDone(index, true));
-        }
-        BatchEvent::Done(index, WorkOutcome::Failed(error)) => {
-            let _ = tx.send(AppEvent::Log(format!("✗ {error}")));
-            let _ = tx.send(AppEvent::FileDone(index, false));
-        }
-        BatchEvent::Done(index, WorkOutcome::Cancelled) => {
-            let _ = tx.send(AppEvent::FileDone(index, false));
-        }
-        BatchEvent::AllDone(summary) => {
-            let _ = tx.send(AppEvent::AllDone {
-                succeeded: summary.succeeded,
-                failed: summary.failed,
-            });
-        }
+/// Builds the workflow-specific async worker closure.
+fn build_worker(
+    workflow: Workflow,
+    options: WorkflowOptions,
+    ffmpeg_path: PathBuf,
+) -> impl Fn(
+    PathBuf,
+    CancellationToken,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<PathBuf>> + Send>>
+       + Send
+       + Sync
+       + Clone
+       + 'static {
+    move |input, cancel| {
+        let workflow = workflow;
+        let options = options.clone();
+        let ffmpeg_path = ffmpeg_path.clone();
+        Box::pin(async move {
+            let output = workflow.output_path(&input, &options)?;
+            if output.exists() && !options.force {
+                return Ok(output);
+            }
+            workflow
+                .run_async(input, output, &options, &ffmpeg_path, cancel, None)
+                .await
+        })
     }
 }
 
-/// Builds the [`FileJob`] matching the selected workflow.
-fn build_job(workflow: Workflow, options: &RunOptions, ffmpeg_path: &Path) -> Arc<dyn FileJob> {
-    match workflow {
-        Workflow::Ts2Mp4 => workers::ts2mp4_job(&options.output_dir, options.force, ffmpeg_path),
-        Workflow::Mkv2Mp3 => workers::mkv2mp3_job(
-            &options.output_dir,
-            options.bitrate,
-            options.cover_size,
-            options.force,
-            ffmpeg_path,
-        ),
-        Workflow::Mp32Mp4 => workers::mp32mp4_job(
-            &options.output_dir,
-            options.bitrate,
-            options.force,
-            false,
-            ffmpeg_path,
-        ),
-        Workflow::Vidwrap => workers::vidwrap_job(options.force, ffmpeg_path),
+/// Collects batch events and forwards them into the TUI event channel.
+async fn collect_events(
+    tx: &Sender<AppEvent>,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<BatchEvent>,
+) -> (ParallelProgress, usize, parallel::BatchSummary) {
+    let mut progress = ParallelProgress::default();
+    let mut failed = 0usize;
+    let mut summary = parallel::BatchSummary::default();
+
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            BatchEvent::Started(index) => {
+                progress.started.insert(index);
+                let _ = tx.send(AppEvent::FileStarted(index));
+            }
+            BatchEvent::Done(index, result) => match result {
+                WorkResult::Success(_) => {
+                    progress.succeeded.insert(index);
+                    let _ = tx.send(AppEvent::FileDone(index, true));
+                }
+                WorkResult::Failed(error) => {
+                    failed += 1;
+                    let _ = tx.send(AppEvent::Log(format!("✗ {error}")));
+                    let _ = tx.send(AppEvent::FileDone(index, false));
+                }
+                WorkResult::Cancelled => {
+                    let _ = tx.send(AppEvent::FileDone(index, false));
+                }
+            },
+            BatchEvent::AllDone(batch_summary) => {
+                summary = batch_summary;
+                break;
+            }
+        }
     }
+
+    (progress, failed, summary)
+}
+
+/// Builds shared workflow options from the TUI's run settings.
+fn workflow_options(options: &RunOptions) -> WorkflowOptions {
+    WorkflowOptions {
+        output_dir: options.output_dir.clone(),
+        force: options.force,
+        bitrate: options.bitrate,
+        cover_size: options.cover_size,
+        no_cover_fallback: false,
+    }
+}
+
+/// Returns partial output files left behind by unfinished tasks.
+fn residual_files(
+    workflow: Workflow,
+    files: &[PathBuf],
+    options: &WorkflowOptions,
+    progress: &ParallelProgress,
+) -> Vec<PathBuf> {
+    progress
+        .started
+        .iter()
+        .filter(|index| !progress.succeeded.contains(index))
+        .filter_map(|index| workflow.output_path(&files[*index], options).ok())
+        .filter(|path| path.exists())
+        .collect()
 }

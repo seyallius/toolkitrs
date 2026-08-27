@@ -3,16 +3,10 @@
 
 use crate::{
     cli::BatchArgs,
-    commands::{
-        batch::{
-            self, resolve_execution_mode, run_parallel_console, run_sequential, BatchTask,
-            FileOutcome,
-        },
-        workers,
-    },
-    components::prompt::ExecutionMode,
+    commands::batch::{run_batch, BatchFuture, BatchTask, FileOutcome},
     ffmpeg::{args, Ffmpeg, ProcessRunner},
-    util::{files, output},
+    util::files,
+    workflow::{Workflow, WorkflowOptions},
 };
 use anyhow::Result;
 use clap::Args;
@@ -20,20 +14,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-
-// --------------------------------- Types, Constants & Variables ------------------------------- //
-
-/// Extension for MP3 audio files.
-const MP3_EXT: &str = "mp3";
-
-/// Extension for MP4 video files.
-const MP4_EXT: &str = "mp4";
-
-/// Human readable name for MP3 files.
-const FILE_TYPE_NAME: &str = "MP3";
+use tokio_util::sync::CancellationToken;
 
 /// Default audio bitrate for MP3 encoding (kbps).
 const DEFAULT_BITRATE: u32 = 320;
+
+/// Prefix for temporary cover image files.
+const TEMP_COVER_PREFIX: &str = "toolkitrs-cover-";
+
+/// Suffix for temporary cover image files.
+const TEMP_COVER_SUFFIX: &str = ".jpg";
 
 // ------------------------------------------ Types & Impls ------------------------------------- //
 
@@ -66,6 +56,7 @@ pub struct Mp32mp4Args {
 }
 
 /// Task definition for MP3 to MP4 conversion.
+#[derive(Debug, Clone, Copy)]
 struct Mp3ToMp4Task {
     /// Audio bitrate in kbps.
     bitrate: u32,
@@ -76,17 +67,29 @@ struct Mp3ToMp4Task {
     /// Whether to skip files without embedded cover art.
     no_cover_fallback: bool,
 }
+
+impl Mp3ToMp4Task {
+    /// Returns the shared workflow execution settings for this task.
+    fn workflow_options(self) -> WorkflowOptions {
+        WorkflowOptions {
+            force: self.force,
+            bitrate: self.bitrate,
+            no_cover_fallback: self.no_cover_fallback,
+            ..WorkflowOptions::default()
+        }
+    }
+}
 impl BatchTask for Mp3ToMp4Task {
     fn input_extension(&self) -> &str {
-        MP3_EXT
+        Workflow::Mp32Mp4.input_extension()
     }
 
     fn output_extension(&self) -> &str {
-        MP4_EXT
+        Workflow::Mp32Mp4.output_extension()
     }
 
     fn file_type_name(&self) -> &str {
-        FILE_TYPE_NAME
+        Workflow::Mp32Mp4.file_type_name()
     }
 
     fn process_file<R: ProcessRunner>(
@@ -95,78 +98,77 @@ impl BatchTask for Mp3ToMp4Task {
         output: &Path,
         ffmpeg: &Ffmpeg<R>,
     ) -> Result<FileOutcome> {
-        let cover = files::temp_path(workers::TEMP_COVER_PREFIX, workers::TEMP_COVER_SUFFIX)?;
+        let cover = files::temp_path(TEMP_COVER_PREFIX, TEMP_COVER_SUFFIX)?;
         let has_cover = match ffmpeg.run(args::extract_embedded_cover(input, &cover)) {
-            Ok(_) => {
-                // FFmpeg succeeded, check if the file has content
-                cover.metadata().map(|m| m.len() > 0).unwrap_or(false)
-            }
-            Err(e) => {
-                // FFmpeg failed - log it so the user knows why
+            Ok(_) => has_file_content(&cover),
+            Err(error) => {
                 eprintln!(
                     "WARNING: Failed to extract cover art from {}: {}",
                     input.display(),
-                    e
+                    error
                 );
-                // Clean up any garbage file
-                let _ = fs::remove_file(&cover);
+                cleanup_temp_file(&cover);
                 false
             }
         };
 
         if !has_cover && self.no_cover_fallback {
-            let _ = fs::remove_file(&cover);
+            cleanup_temp_file(&cover);
             return Ok(FileOutcome::Skipped(format!(
                 "no cover art in {}",
                 input.display()
             )));
         }
 
-        ffmpeg.run(args::encode_mp4(
+        let result = ffmpeg.run(args::encode_mp4(
             has_cover.then_some(cover.as_path()),
             input,
             output,
             self.bitrate,
             self.force,
-        ))?;
+        ));
 
-        let _ = fs::remove_file(&cover);
+        cleanup_temp_file(&cover);
+        result?;
         Ok(FileOutcome::Success)
+    }
+
+    fn process_file_async(
+        &self,
+        input: PathBuf,
+        output: PathBuf,
+        ffmpeg_binary: PathBuf,
+        cancel: CancellationToken,
+    ) -> BatchFuture {
+        let options = self.workflow_options();
+        Box::pin(async move {
+            Workflow::Mp32Mp4
+                .run_async(input, output, &options, &ffmpeg_binary, cancel, None)
+                .await
+        })
     }
 }
 
 // ----------------------------------------- Public API ----------------------------------------- //
 
 /// Runs the MP3 to MP4 conversion using the generic batch pipeline.
-///
-/// The queue and error policy are resolved once, then dispatched to either
-/// the sequential or the parallel runner.
 pub fn run<R: ProcessRunner>(args_cli: Mp32mp4Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
     let task = Mp3ToMp4Task {
         bitrate: args_cli.bitrate,
         force: args_cli.batch.force,
         no_cover_fallback: args_cli.no_cover_fallback,
     };
+    run_batch(&task, &args_cli.batch, args_cli.files, ffmpeg)
+}
 
-    // One resolution pass: queue + error policy (may prompt for siblings).
-    let (queue, policy) = batch::resolve_queue(&task, &args_cli.batch, args_cli.files.clone())?;
+// -------------------------------------- Internal Helpers -------------------------------------- //
 
-    if queue.is_empty() {
-        return batch::report_empty_queue(FILE_TYPE_NAME);
-    }
+/// Returns true when the file exists and contains data.
+fn has_file_content(path: &Path) -> bool {
+    path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
+}
 
-    match resolve_execution_mode(queue.len(), args_cli.batch.mode)? {
-        ExecutionMode::Sequential => run_sequential(&task, &args_cli.batch, queue, policy, ffmpeg),
-        ExecutionMode::Parallel => {
-            output::ensure_directory(&args_cli.batch.output_dir)?;
-            let job = workers::mp32mp4_job(
-                &args_cli.batch.output_dir,
-                args_cli.bitrate,
-                args_cli.batch.force,
-                args_cli.no_cover_fallback,
-                ffmpeg.binary(),
-            );
-            run_parallel_console(FILE_TYPE_NAME, queue, job)
-        }
-    }
+/// Best-effort temp file cleanup.
+fn cleanup_temp_file(path: &Path) {
+    let _ = fs::remove_file(path);
 }

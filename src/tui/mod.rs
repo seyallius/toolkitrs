@@ -1,11 +1,13 @@
 //! module tui - Interactive terminal UI for the toolkitrs built on ratatui.
 //!
 //! Responsibilities are split deliberately (Single Responsibility):
-//!   * `app`      → state machine + input handling
-//!   * `ui`       → pure rendering (reads state, draws widgets)
-//!   * `event`    → keyboard + async events over a channel
-//!   * `runner`   → background ffmpeg execution that streams logs
-//!   * `workflow` → metadata about each media workflow
+//!   * `app`    → state machine + input handling
+//!   * `ui`     → pure rendering (reads state, draws widgets)
+//!   * `event`  → keyboard + async events over a channel
+//!   * `runner` → background workflow execution
+//!
+//! Shared workflow metadata lives in `crate::workflow`, outside the TUI,
+//! so the CLI and TUI use the same domain model.
 //!
 //! This mirrors a classic loop: read events → update state → draw.
 
@@ -13,7 +15,6 @@ mod app;
 mod event;
 mod runner;
 mod ui;
-mod workflow;
 
 use crate::tui::{app::App, event::AppEvent};
 use anyhow::Result;
@@ -108,13 +109,12 @@ fn event_loop(
             Ok(AppEvent::FileDone(i, ok)) => app.file_done(i, ok),
             Ok(AppEvent::AllDone { succeeded, failed }) => app.all_done(succeeded, failed),
             Ok(AppEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => app.tick(),
-            Ok(AppEvent::CancelledWithResidual(files)) => {
-                app.running = false;
-                app.finished = true;
-                app.residual_files = files;
-                app.show_cleanup_prompt = true;
-                app.cancel_token = None;
+            Ok(AppEvent::CancelAll) => {
+                if let Some(token) = &app.cancel_token {
+                    token.cancel();
+                }
             }
+            Ok(AppEvent::CancelledWithResidual(files)) => app.cancelled_with_residual(files),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }

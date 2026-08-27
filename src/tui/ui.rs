@@ -47,13 +47,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let crumb = match app.screen {
         Screen::Home => "workflows".to_string(),
-        Screen::FilePicker => format!(
-            "{} · {}",
-            app.selected_workflow.map(|w| w.title()).unwrap_or(""),
-            app.cwd.display()
-        ),
-        Screen::Options => "options".to_string(),
-        Screen::Running => "running".to_string(),
+        Screen::FilePicker => format!("{} · {}", app.workflow_title(), app.cwd.display()),
+        Screen::Options => format!("options · {}", app.workflow_title()),
+        Screen::Running => format!("running · {}", app.workflow_title()),
     };
     let title = Line::from(vec![
         Span::styled(
@@ -161,36 +157,17 @@ fn render_picker(f: &mut Frame, app: &App, area: Rect) {
 
 /// Renders the options list with current values.
 fn render_options(f: &mut Frame, app: &App, area: Rect) {
-    let wf = app.selected_workflow;
-    let rows = [
-        format!(
-            "Force overwrite      : {}",
-            if app.options.force { "ON" } else { "OFF" }
-        ),
-        format!("Audio bitrate        : {} kbps", app.options.bitrate),
-        format!("Cover size           : {} px", app.options.cover_size),
-        format!(
-            "Output directory     : {}",
-            app.options.output_dir.display()
-        ),
-        format!(
-            "Parallelism          : {}",
-            if app.parallel {
-                "Parallel"
-            } else {
-                "Sequential"
-            }
-        ),
-        "▶ Start".to_string(),
-    ];
-
-    let items: Vec<Line> = rows
+    let items: Vec<Line> = app
+        .option_rows()
         .iter()
         .enumerate()
         .map(|(i, text)| {
             let cursor = i == app.options_index;
+            let is_na_row = text.contains("N/A for this workflow");
             let style = if cursor {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else if is_na_row {
+                Style::default().fg(DIM)
             } else {
                 Style::default()
             };
@@ -199,13 +176,12 @@ fn render_options(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let subtitle = wf.map(|w| w.title()).unwrap_or("");
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(DIM))
-            .title(format!(" Options · {subtitle} ")),
+            .title(format!(" Options · {} ", app.workflow_title())),
     );
 
     // Use ListState to enable scrolling
@@ -368,9 +344,6 @@ fn render_cleanup_popup(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Helper for centering a rect inside `r`.
-///
-/// Splits vertically first (top band, popup band, bottom band), then
-/// horizontally inside the popup band (left, popup, right).
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)

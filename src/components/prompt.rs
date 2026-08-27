@@ -118,44 +118,6 @@ pub fn choice<R: BufRead, W: Write>(
     Ok(parse_choice(&line, options.len(), default))
 }
 
-/// Parses a sibling-batch selection.
-///
-/// Accepts numbers and convenient words:
-/// - `1`, `only`, `input`, `single`
-/// - `2`, `stop`
-/// - `3`, `skip`
-/// - `4`, `prompt`, `ask`, `each`
-fn parse_sibling_choice(value: &str, default: SiblingBatchChoice) -> SiblingBatchChoice {
-    let normalized = value.trim().to_ascii_lowercase();
-
-    match normalized.as_str() {
-        "" => default,
-        "1" | "only" | "input" | "single" => SiblingBatchChoice::ProcessInputOnly,
-        "2" | "stop" | "error" => SiblingBatchChoice::ProcessAllStopOnError,
-        "3" | "skip" => SiblingBatchChoice::ProcessAllSkipOnError,
-        "4" | "prompt" | "ask" | "each" => SiblingBatchChoice::ProcessAllPromptEach,
-        _ => default,
-    }
-}
-
-/// Parses a continue selection.
-///
-/// Accepts numbers and words:
-/// - `1`, `y`, `yes`
-/// - `2`, `n`, `no`
-/// - `3`, `a`, `all`, `yes to all`
-fn parse_continue(value: &str, default: ContinueChoice) -> ContinueChoice {
-    let normalized = value.trim().to_ascii_lowercase();
-
-    match normalized.as_str() {
-        "" => default,
-        "1" | "y" | "yes" => ContinueChoice::Yes,
-        "2" | "n" | "no" => ContinueChoice::No,
-        "3" | "a" | "all" | "yes to all" | "yes-to-all" => ContinueChoice::YesToAll,
-        _ => default,
-    }
-}
-
 /// Ask what to do when more videos are discovered next to an explicit input.
 ///
 /// This is used when the user runs something like:
@@ -340,6 +302,46 @@ pub fn cleanup_residual_choice<R: BufRead, W: Write>(
         "2" | "n" | "no" | "keep" => CleanupChoice::Keep,
         _ => CleanupChoice::Remove,
     })
+}
+
+// -------------------------------------- Internal Helpers -------------------------------------- //
+
+/// Parses a sibling-batch selection.
+///
+/// Accepts numbers and convenient words:
+/// - `1`, `only`, `input`, `single`
+/// - `2`, `stop`
+/// - `3`, `skip`
+/// - `4`, `prompt`, `ask`, `each`
+fn parse_sibling_choice(value: &str, default: SiblingBatchChoice) -> SiblingBatchChoice {
+    let normalized = value.trim().to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "" => default,
+        "1" | "only" | "input" | "single" => SiblingBatchChoice::ProcessInputOnly,
+        "2" | "stop" | "error" => SiblingBatchChoice::ProcessAllStopOnError,
+        "3" | "skip" => SiblingBatchChoice::ProcessAllSkipOnError,
+        "4" | "prompt" | "ask" | "each" => SiblingBatchChoice::ProcessAllPromptEach,
+        _ => default,
+    }
+}
+
+/// Parses a continue selection.
+///
+/// Accepts numbers and words:
+/// - `1`, `y`, `yes`
+/// - `2`, `n`, `no`
+/// - `3`, `a`, `all`, `yes to all`
+fn parse_continue(value: &str, default: ContinueChoice) -> ContinueChoice {
+    let normalized = value.trim().to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "" => default,
+        "1" | "y" | "yes" => ContinueChoice::Yes,
+        "2" | "n" | "no" => ContinueChoice::No,
+        "3" | "a" | "all" | "yes to all" | "yes-to-all" => ContinueChoice::YesToAll,
+        _ => default,
+    }
 }
 
 #[cfg(test)]

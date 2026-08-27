@@ -3,16 +3,10 @@
 
 use crate::{
     cli::BatchArgs,
-    commands::{
-        batch::{
-            self, resolve_execution_mode, run_parallel_console, run_sequential, BatchTask,
-            FileOutcome,
-        },
-        workers,
-    },
-    components::prompt::ExecutionMode,
+    commands::batch::{run_batch, BatchFuture, BatchTask, FileOutcome},
     ffmpeg::{args, Ffmpeg, ProcessRunner},
-    util::{files, output},
+    util::files,
+    workflow::{Workflow, WorkflowOptions},
 };
 use anyhow::Result;
 use clap::Args;
@@ -20,17 +14,9 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use tokio_util::sync::CancellationToken;
 
 // --------------------------------- Types, Constants & Variables ------------------------------- //
-
-/// Extension for Matroska video files.
-const MKV_EXT: &str = "mkv";
-
-/// Extension for MP3 audio files.
-const MP3_EXT: &str = "mp3";
-
-/// Human readable name for MKV files.
-const FILE_TYPE_NAME: &str = "MKV";
 
 /// Default audio bitrate for MP3 encoding (kbps).
 const DEFAULT_BITRATE: u32 = 320;
@@ -38,11 +24,17 @@ const DEFAULT_BITRATE: u32 = 320;
 /// Default size (width and height) for extracted cover art.
 const DEFAULT_COVER_SIZE: u32 = 600;
 
+/// Prefix for temporary cover image files.
+const TEMP_COVER_PREFIX: &str = "toolkitrs-cover-";
+
+/// Suffix for temporary cover image files.
+const TEMP_COVER_SUFFIX: &str = ".jpg";
+
 /// Warning prefix for non-fatal issues like missing cover art.
 const WARNING_PREFIX: &str = "WARNING";
 
-/// Warning message prefix printed before the input path when cover extraction fails.
-const COVER_EXTRACTION_WARNING: &str = "cover extraction failed for";
+/// Warning message for failed cover extraction.
+const COVER_EXTRACTION_WARNING: &str = "cover extraction failed; continuing without cover";
 
 // ------------------------------------------ Types & Impls ------------------------------------- //
 
@@ -75,6 +67,7 @@ pub struct Mkv2mp3Args {
 }
 
 /// Task definition for MKV to MP3 extraction.
+#[derive(Debug, Clone, Copy)]
 struct MkvToMp3Task {
     /// Size in pixels for the extracted cover art square.
     cover_size: u32,
@@ -85,17 +78,29 @@ struct MkvToMp3Task {
     /// Whether to force overwrite existing files.
     force: bool,
 }
+
+impl MkvToMp3Task {
+    /// Returns the shared workflow execution settings for this task.
+    fn workflow_options(self) -> WorkflowOptions {
+        WorkflowOptions {
+            force: self.force,
+            bitrate: self.bitrate,
+            cover_size: self.cover_size,
+            ..WorkflowOptions::default()
+        }
+    }
+}
 impl BatchTask for MkvToMp3Task {
     fn input_extension(&self) -> &str {
-        MKV_EXT
+        Workflow::Mkv2Mp3.input_extension()
     }
 
     fn output_extension(&self) -> &str {
-        MP3_EXT
+        Workflow::Mkv2Mp3.output_extension()
     }
 
     fn file_type_name(&self) -> &str {
-        FILE_TYPE_NAME
+        Workflow::Mkv2Mp3.file_type_name()
     }
 
     fn process_file<R: ProcessRunner>(
@@ -104,64 +109,68 @@ impl BatchTask for MkvToMp3Task {
         output: &Path,
         ffmpeg: &Ffmpeg<R>,
     ) -> Result<FileOutcome> {
-        let cover = files::temp_path(workers::TEMP_COVER_PREFIX, workers::TEMP_COVER_SUFFIX)?;
+        let cover = files::temp_path(TEMP_COVER_PREFIX, TEMP_COVER_SUFFIX)?;
         let has_cover = ffmpeg
             .run(args::extract_frame(input, &cover, self.cover_size))
             .is_ok()
-            && cover.metadata().map(|m| m.len() > 0).unwrap_or(false);
+            && has_file_content(&cover);
 
         if !has_cover {
             eprintln!(
-                "{WARNING_PREFIX}: {COVER_EXTRACTION_WARNING} {}; continuing without cover",
+                "{WARNING_PREFIX}: {COVER_EXTRACTION_WARNING}: {}",
                 input.display()
             );
         }
 
-        ffmpeg.run(args::encode_mp3(
+        let result = ffmpeg.run(args::encode_mp3(
             input,
             has_cover.then_some(cover.as_path()),
             output,
             self.bitrate,
             self.force,
-        ))?;
+        ));
 
-        let _ = fs::remove_file(&cover);
+        cleanup_temp_file(&cover);
+        result?;
         Ok(FileOutcome::Success)
+    }
+
+    fn process_file_async(
+        &self,
+        input: PathBuf,
+        output: PathBuf,
+        ffmpeg_binary: PathBuf,
+        cancel: CancellationToken,
+    ) -> BatchFuture {
+        let options = self.workflow_options();
+        Box::pin(async move {
+            Workflow::Mkv2Mp3
+                .run_async(input, output, &options, &ffmpeg_binary, cancel, None)
+                .await
+        })
     }
 }
 
 // ----------------------------------------- Public API ----------------------------------------- //
 
 /// Runs the MKV to MP3 conversion using the generic batch pipeline.
-///
-/// The queue and error policy are resolved once, then dispatched to either
-/// the sequential or the parallel runner.
 pub fn run<R: ProcessRunner>(args_cli: Mkv2mp3Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
     let task = MkvToMp3Task {
         cover_size: args_cli.cover_size,
         bitrate: args_cli.bitrate,
         force: args_cli.batch.force,
     };
+    run_batch(&task, &args_cli.batch, args_cli.files, ffmpeg)
+}
 
-    // One resolution pass: queue + error policy (may prompt for siblings).
-    let (queue, policy) = batch::resolve_queue(&task, &args_cli.batch, args_cli.files.clone())?;
+// -------------------------------------- Internal Helpers -------------------------------------- //
 
-    if queue.is_empty() {
-        return batch::report_empty_queue(FILE_TYPE_NAME);
-    }
+/// Returns true when the file exists and contains data.
+fn has_file_content(path: &Path) -> bool {
+    path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
+}
 
-    match resolve_execution_mode(queue.len(), args_cli.batch.mode)? {
-        ExecutionMode::Sequential => run_sequential(&task, &args_cli.batch, queue, policy, ffmpeg),
-        ExecutionMode::Parallel => {
-            output::ensure_directory(&args_cli.batch.output_dir)?;
-            let job = workers::mkv2mp3_job(
-                &args_cli.batch.output_dir,
-                args_cli.bitrate,
-                args_cli.cover_size,
-                args_cli.batch.force,
-                ffmpeg.binary(),
-            );
-            run_parallel_console(FILE_TYPE_NAME, queue, job)
-        }
-    }
+/// Best-effort temp file cleanup.
+fn cleanup_temp_file(path: &Path) {
+    let _ = fs::remove_file(path);
 }

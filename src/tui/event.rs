@@ -29,6 +29,8 @@ pub enum AppEvent {
     FileDone(usize, bool),
     /// Whole batch finished with counts.
     AllDone { succeeded: usize, failed: usize },
+    /// User requested cancellation of the whole batch.
+    CancelAll,
     /// Batch was cancelled; reports residual files for cleanup decision.
     CancelledWithResidual(Vec<PathBuf>),
 }
