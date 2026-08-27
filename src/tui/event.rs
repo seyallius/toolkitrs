@@ -9,6 +9,8 @@ use std::{
     time::Duration,
 };
 
+// ---------------------------------------------- Types ----------------------------------------- //
+
 /// Everything the event loop can react to.
 ///
 /// Terminal events (keys/ticks) and process events (logs/progress)
@@ -27,11 +29,11 @@ pub enum AppEvent {
     FileDone(usize, bool),
     /// Whole batch finished with counts.
     AllDone { succeeded: usize, failed: usize },
-    /// User requested cancellation of the whole batch.
-    CancelAll,
     /// Batch was cancelled; reports residual files for cleanup decision.
     CancelledWithResidual(Vec<PathBuf>),
 }
+
+// ----------------------------------------- Public API ----------------------------------------- //
 
 /// Spawns a thread that forwards pressed keys and periodic ticks to `tx`.
 ///

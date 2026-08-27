@@ -11,14 +11,14 @@ use crate::{
         batch::{BatchPolicy, BatchReport},
         files,
         output::{self, OutputDecision},
-        parallel::{self, BatchEvent, BatchSummary},
+        parallel::{self, BatchEvent, FileJob, WorkOutcome},
     },
 };
 use anyhow::{bail, Context, Result};
 use std::{
-    future::Future,
     io::{self, BufReader, IsTerminal},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -64,56 +64,52 @@ pub trait BatchTask {
 
 // ----------------------------------------- Public API ----------------------------------------- //
 
-/// Executes an interactive batch process over a collection of files.
+/// Resolves the execution queue and batch policy from CLI arguments and interactive prompts.
 ///
-/// Handles queue resolution (including sibling discovery), error policies,
-/// continuation prompts, and final reporting.
-pub fn run_batch<R: ProcessRunner, T: BatchTask>(
+/// This is the single resolution pass shared by every batch command: it
+/// canonicalizes explicit files, discovers siblings, prompts when needed,
+/// and applies the `--on-error` policy. Commands call it once and dispatch
+/// on the result, so prompts never fire twice.
+pub fn resolve_queue<T: BatchTask>(
     task: &T,
     args: &BatchArgs,
     explicit_files: Vec<PathBuf>,
-    ffmpeg: &Ffmpeg<R>,
-) -> Result<()> {
-    println!(
-        "{}",
-        banner::render(
-            task.file_type_name(),
-            Some("Batch Processing"),
-            console::colors_enabled()
-        )
-    );
+) -> Result<(Vec<PathBuf>, BatchPolicy)> {
+    let ext = task.input_extension();
+    let exclude = task.exclude_stem_suffix();
 
-    let (queue, policy) = resolve_queue_and_policy(task, args, explicit_files)?;
-
-    if queue.is_empty() {
-        println!("No {} files found to process.", task.file_type_name());
-        return Ok(());
-    }
-
-    // Ensure output directory exists if we are going to process anything
-    output::ensure_directory(&args.output_dir)?;
-
-    // Decide execution mode (parallel vs sequential) for multi-file batches.
-    let mode = resolve_execution_mode(queue.len(), args.mode)?;
-    match mode {
-        ExecutionMode::Sequential => execute_queue(task, args, &queue, policy, ffmpeg),
-        ExecutionMode::Parallel => {
-            // Build a worker closure that delegates to the task's async worker.
-            // We use Arc so the closure can be cloned cheaply per spawn.
-            let output_dir = args.output_dir.clone();
-            let output_ext = task.output_extension().to_string();
-            let force = args.force;
-            let binary = ffmpeg.binary().to_path_buf();
-
-            // Dispatch by workflow — each command calls run_batch_parallel directly
-            // with its own worker. Here we provide a generic worker for any
-            // BatchTask by routing through the async_workers module.
-            //
-            // Since workers.rs has per-workflow functions, we expect each command
-            // to call run_batch_parallel itself. For commands that haven't been
-            // migrated yet, fall back to sequential.
-            execute_queue(task, args, &queue, policy, ffmpeg)
+    match (explicit_files.len(), &args.input_dir, args.batch) {
+        // Explicit directory scan
+        (0, Some(dir), _) | (_, Some(dir), _) => {
+            if !explicit_files.is_empty() {
+                bail!("Cannot combine explicit files with --input-dir");
+            }
+            resolve_directory_queue(dir, ext, exclude, args.on_error)
         }
+        // No explicit files (batch flag or bare invocation): scan the CWD
+        (0, None, _) => {
+            let cwd = std::env::current_dir().context("reading current directory")?;
+            resolve_directory_queue(&cwd, ext, exclude, args.on_error)
+        }
+        // Single file provided, no batch flags -> sibling discovery
+        (1, None, false) => {
+            if args.on_error.is_some() {
+                bail!("--on-error can only be used with --batch or --input-dir");
+            }
+            let file = explicit_files.into_iter().next().unwrap();
+            resolve_single_file_with_siblings(ext, exclude, &file)
+        }
+        // Multiple files provided, no batch flags
+        (n, None, false) if n > 1 => {
+            if args.on_error.is_some() {
+                bail!("--on-error can only be used with --batch or --input-dir");
+            }
+            // Just use the provided files, default to skip on error for safety
+            let queue = filter_and_canonicalize(explicit_files, task.file_type_name());
+            Ok((queue, BatchPolicy::SkipOnError))
+        }
+        // Files combined with the batch flag
+        _ => bail!("Invalid combination of batch arguments"),
     }
 }
 
@@ -147,32 +143,50 @@ pub fn resolve_execution_mode(
     )?)
 }
 
-/// Runs a parallel batch with the given worker closure.
+/// Runs a batch sequentially with interactive skip/overwrite decisions and error policies.
 ///
-/// This is shared by all workflows: the caller passes a closure that knows
-/// how to process one file for its specific workflow.
+/// `queue` and `policy` come from [`resolve_queue`]; this function only
+/// executes them, so the queue is resolved exactly once per run.
+pub fn run_sequential<R: ProcessRunner, T: BatchTask>(
+    task: &T,
+    args: &BatchArgs,
+    queue: Vec<PathBuf>,
+    policy: BatchPolicy,
+    ffmpeg: &Ffmpeg<R>,
+) -> Result<()> {
+    println!(
+        "{}",
+        banner::render(
+            task.file_type_name(),
+            Some("Batch Processing"),
+            console::colors_enabled()
+        )
+    );
+
+    if queue.is_empty() {
+        println!("No {} files found to process.", task.file_type_name());
+        return Ok(());
+    }
+
+    output::ensure_directory(&args.output_dir)?;
+
+    execute_queue(task, args, &queue, policy, ffmpeg)
+}
+
+/// Runs a batch in parallel with live console reporting and Ctrl+C support.
+///
+/// This is shared by every workflow: the caller passes a [`FileJob`] that
+/// knows how to convert one file for its specific workflow.
 ///
 /// # Arguments
-/// * `banner_title` - Title for the banner (e.g. "TS").
+/// * `banner_title` - Title for the banners (e.g. "TS").
 /// * `queue` - Input file paths, in order.
-/// * `output_dir` - Where outputs go.
-/// * `output_ext` - Output extension (used to pre-compute output paths for cleanup).
-/// * `force` - Overwrite existing outputs.
-/// * `ffmpeg_binary` - Path to the ffmpeg binary.
-/// * `worker` - Async closure: `(input, cancel) -> Result<PathBuf>`.
-pub fn run_batch_parallel<F, Fut>(
+/// * `job` - Strategy that converts one input file.
+pub fn run_parallel_console(
     banner_title: &str,
     queue: Vec<PathBuf>,
-    output_dir: &Path,
-    output_ext: &str,
-    force: bool,
-    ffmpeg_binary: &Path,
-    worker: F,
-) -> Result<()>
-where
-    F: Fn(PathBuf, CancellationToken) -> Fut + Send + Sync + Clone + 'static,
-    Fut: Future<Output = Result<PathBuf>> + Send + 'static,
-{
+    job: Arc<dyn FileJob>,
+) -> Result<()> {
     println!(
         "{}",
         banner::render(
@@ -182,117 +196,17 @@ where
         )
     );
 
-    output::ensure_directory(output_dir)?;
+    let names = queue.clone();
+    let run = parallel::run_blocking(
+        queue,
+        parallel::num_cpus(),
+        CancellationToken::new(),
+        job,
+        |event| report_console(&names, event),
+    )?;
 
-    let cores = parallel::num_cpus();
-    let cancel = CancellationToken::new();
-
-    // Ctrl+C handler — first Ctrl+C cancels gracefully.
-    let cancel_clone = cancel.clone();
-    let ctrl_c_handle = std::thread::spawn(move || {
-        // We use a tiny single-threaded runtime just for the signal handler.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("ctrl-c runtime");
-        rt.block_on(async {
-            let _ = tokio::signal::ctrl_c().await;
-            eprintln!("\nCancellation requested (press Ctrl+C again to force exit)...");
-            cancel_clone.cancel();
-        });
-    });
-
-    // Pre-compute output paths so we can identify residual files after cancel.
-    let outputs: Vec<PathBuf> = queue
-        .iter()
-        .map(|p| output::output_path(p, output_dir, output_ext))
-        .collect::<Result<_>>()?;
-
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BatchEvent>();
-
-    // The actual parallel run happens inside a multi-threaded tokio runtime.
-    let binary = ffmpeg_binary.to_path_buf();
-    let runner_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    let queue_for_runner = queue.clone();
-    let runner_handle = runner_rt.spawn(async move {
-        parallel::run_parallel(queue_for_runner, cores, cancel.clone(), event_tx, worker).await
-    });
-
-    // Drive the event loop from the calling thread (sync API).
-    let runtime_guard = runner_rt.enter();
-    let _ = runtime_guard; // keep the runtime alive via runner_handle
-
-    let mut started: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut succeeded: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut failed = 0usize;
-    let mut summary = BatchSummary::default();
-
-    // Block on receiving events.
-    runner_rt.block_on(async {
-        while let Some(event) = event_rx.recv().await {
-            match event {
-                BatchEvent::Started(i) => {
-                    started.insert(i);
-                    println!("▶ Started [{}]: {}", i + 1, queue[i].display());
-                }
-                BatchEvent::Done(i, work_result) => {
-                    if work_result.is_success() {
-                        // Success case - unwrap the path
-                        if let Some(path) = work_result.path {
-                            println!("✔ Success [{}]: {}", i + 1, path.display());
-                            succeeded.insert(i);
-                        }
-                    } else if let Some(error) = work_result.error {
-                        // Check if it was a cancellation
-                        if error == "cancelled" {
-                            eprintln!("⊗ Cancelled [{}]: {}", i + 1, queue[i].display());
-                        } else {
-                            eprintln!("✖ Failed [{}]: {}", i + 1, error);
-                            failed += 1;
-                        }
-                    }
-                }
-                BatchEvent::AllDone(s) => {
-                    summary = s;
-                    break;
-                }
-            }
-        }
-    });
-
-    // Drop the runner handle to free the runtime.
-    let _ = runner_handle;
-
-    // Stop the Ctrl+C listener thread.
-    drop(ctrl_c_handle);
-
-    // If canceled, prompt for residual file cleanup.
-    if summary.cancelled {
-        let residual: Vec<PathBuf> = started
-            .iter()
-            .filter(|i| !succeeded.contains(i))
-            .filter_map(|i| outputs.get(*i).filter(|p| p.exists()).cloned())
-            .collect();
-
-        if !residual.is_empty() {
-            let stdin = io::stdin();
-            let mut input = BufReader::new(stdin.lock());
-            let mut stdout = io::stdout();
-            match prompt::cleanup_residual_choice(&mut input, &mut stdout, &residual)? {
-                CleanupChoice::Remove => {
-                    for p in &residual {
-                        let _ = std::fs::remove_file(p);
-                    }
-                    println!("Removed {} residual files.", residual.len());
-                }
-                CleanupChoice::Keep => {
-                    println!("Kept {} residual files.", residual.len());
-                }
-            }
-        }
+    if run.summary.cancelled {
+        prompt_residual_cleanup(&run.residual_files)?;
     }
 
     println!(
@@ -301,9 +215,9 @@ where
             "Done",
             Some(&format!(
                 "{} succeeded · {} failed{}",
-                summary.succeeded,
-                summary.failed,
-                if summary.cancelled {
+                run.summary.succeeded,
+                run.summary.failed,
+                if run.summary.cancelled {
                     " · cancelled"
                 } else {
                     ""
@@ -313,111 +227,56 @@ where
         )
     );
 
-    if summary.failed > 0 {
+    if run.summary.failed > 0 {
         bail!("one or more conversions failed");
     }
     Ok(())
 }
 
-/// Resolves only the queue + policy without executing anything.
-/// Used by commands that want to dispatch to parallel themselves.
-pub fn resolve_queue_only<T: BatchTask>(
-    task: &T,
-    args: &BatchArgs,
-    explicit_files: Vec<PathBuf>,
-) -> Result<(Vec<PathBuf>, BatchPolicy)> {
-    resolve_queue_and_policy(task, args, explicit_files)
+/// Prints the banner and a "nothing found" notice, then returns success.
+///
+/// Used by commands that resolved an empty queue and have nothing to do.
+pub fn report_empty_queue(file_type_name: &str) -> Result<()> {
+    println!(
+        "{}",
+        banner::render(
+            file_type_name,
+            Some("Batch Processing"),
+            console::colors_enabled()
+        )
+    );
+    println!("No {file_type_name} files found to process.");
+    Ok(())
 }
 
-// -------------------------------------- Internal Helpers -------------------------------------- //
-
-/// Resolves the execution queue and batch policy from CLI arguments and interactive prompts.
-fn resolve_queue_and_policy<T: BatchTask>(
-    task: &T,
-    args: &BatchArgs,
-    explicit_files: Vec<PathBuf>,
+/// Scans a directory for a batch and applies the error policy.
+pub fn resolve_directory_queue(
+    directory: &Path,
+    input_extension: &str,
+    exclude_stem_suffix: Option<&str>,
+    on_error: Option<BatchOnError>,
 ) -> Result<(Vec<PathBuf>, BatchPolicy)> {
-    let ext = task.input_extension();
-    let exclude = task.exclude_stem_suffix();
-
-    match (explicit_files.len(), &args.input_dir, args.batch) {
-        // Explicit directory scan
-        (0, Some(dir), _) | (_, Some(dir), _) => {
-            if !explicit_files.is_empty() {
-                bail!("Cannot combine explicit files with --input-dir");
-            }
-            let dir = dir
-                .canonicalize()
-                .with_context(|| format!("directory not found: {}", dir.display()))?;
-            let queue = files::queue_from_directory(&dir, ext, exclude)?;
-            let policy = resolve_explicit_policy(args.on_error);
-            Ok((queue, policy))
-        }
-        // Explicit batch flag without files or input-dir -> scan CWD
-        (0, None, true) => {
-            let cwd = std::env::current_dir().context("reading current directory")?;
-            let queue = files::queue_from_directory(&cwd, ext, exclude)?;
-            let policy = resolve_explicit_policy(args.on_error);
-            Ok((queue, policy))
-        }
-        // Single file provided, no batch flags -> sibling discovery
-        (1, None, false) => {
-            if args.on_error.is_some() {
-                bail!("--on-error can only be used with --batch or --input-dir");
-            }
-            let file = explicit_files.into_iter().next().unwrap();
-            resolve_single_file_with_siblings(task, &file)
-        }
-        // Multiple files provided, no batch flags
-        (n, None, false) if n > 1 => {
-            if args.on_error.is_some() {
-                bail!("--on-error can only be used with --batch or --input-dir");
-            }
-            // Just use the provided files, default to skip on error for safety
-            let queue = filter_and_canonicalize(explicit_files, task.file_type_name());
-            Ok((queue, BatchPolicy::SkipOnError))
-        }
-        // No files, no flags -> Fallback: scan CWD
-        (0, None, false) => {
-            let cwd = std::env::current_dir().context("reading current directory")?;
-            let queue = files::queue_from_directory(&cwd, ext, exclude)?;
-            let policy = resolve_explicit_policy(args.on_error);
-            Ok((queue, policy))
-        }
-        _ => bail!("Invalid combination of batch arguments"),
-    }
-}
-
-/// Resolves policy for explicit batch runs (--batch or --input-dir).
-fn resolve_explicit_policy(on_error: Option<BatchOnError>) -> BatchPolicy {
-    match on_error {
-        Some(BatchOnError::Stop) => BatchPolicy::StopOnError,
-        Some(BatchOnError::Skip) => BatchPolicy::SkipOnError,
-        Some(BatchOnError::Prompt) => BatchPolicy::PromptEach,
-        None => {
-            if io::stdin().is_terminal() {
-                BatchPolicy::PromptEach
-            } else {
-                BatchPolicy::SkipOnError
-            }
-        }
-    }
+    let dir = directory
+        .canonicalize()
+        .with_context(|| format!("directory not found: {}", directory.display()))?;
+    let queue = files::queue_from_directory(&dir, input_extension, exclude_stem_suffix)?;
+    Ok((queue, resolve_explicit_policy(on_error)))
 }
 
 /// Handles sibling discovery and prompting for a single explicit file.
-fn resolve_single_file_with_siblings<T: BatchTask>(
-    task: &T,
+///
+/// If additional files with the same extension are discovered next to it,
+/// the user is asked whether to expand the operation into a batch.
+pub fn resolve_single_file_with_siblings(
+    input_extension: &str,
+    exclude_stem_suffix: Option<&str>,
     file: &Path,
 ) -> Result<(Vec<PathBuf>, BatchPolicy)> {
     let canonical = file
         .canonicalize()
         .with_context(|| format!("file not found: {}", file.display()))?;
 
-    let queue = files::queue_from_entry(
-        &canonical,
-        task.input_extension(),
-        task.exclude_stem_suffix(),
-    )?;
+    let queue = files::queue_from_entry(&canonical, input_extension, exclude_stem_suffix)?;
 
     if queue.len() <= 1 {
         return Ok((vec![canonical], BatchPolicy::Single));
@@ -438,6 +297,65 @@ fn resolve_single_file_with_siblings<T: BatchTask>(
     };
 
     Ok((final_queue, policy))
+}
+
+// ----------------------------------------- Internal Helpers --------------------------------------- //
+
+/// Resolves policy for explicit batch runs (--batch or --input-dir).
+fn resolve_explicit_policy(on_error: Option<BatchOnError>) -> BatchPolicy {
+    match on_error {
+        Some(BatchOnError::Stop) => BatchPolicy::StopOnError,
+        Some(BatchOnError::Skip) => BatchPolicy::SkipOnError,
+        Some(BatchOnError::Prompt) => BatchPolicy::PromptEach,
+        None => {
+            if io::stdin().is_terminal() {
+                BatchPolicy::PromptEach
+            } else {
+                BatchPolicy::SkipOnError
+            }
+        }
+    }
+}
+
+/// Prints one batch event to the console.
+fn report_console(names: &[PathBuf], event: BatchEvent) {
+    match event {
+        BatchEvent::Started(index) => {
+            println!("▶ Started [{}]: {}", index + 1, names[index].display())
+        }
+        BatchEvent::Done(index, WorkOutcome::Success(path)) => {
+            println!("✔ Success [{}]: {}", index + 1, path.display())
+        }
+        BatchEvent::Done(index, WorkOutcome::Failed(error)) => {
+            eprintln!("✖ Failed [{}]: {}", index + 1, error)
+        }
+        BatchEvent::Done(index, WorkOutcome::Cancelled) => {
+            eprintln!("⊗ Cancelled [{}]: {}", index + 1, names[index].display())
+        }
+        BatchEvent::AllDone(_) => {}
+    }
+}
+
+/// Asks whether leftover partial outputs should be deleted, then acts on it.
+fn prompt_residual_cleanup(residual: &[PathBuf]) -> Result<()> {
+    if residual.is_empty() {
+        return Ok(());
+    }
+
+    let stdin = io::stdin();
+    let mut input = BufReader::new(stdin.lock());
+    let mut stdout = io::stdout();
+
+    match prompt::cleanup_residual_choice(&mut input, &mut stdout, residual)? {
+        CleanupChoice::Remove => {
+            for path in residual {
+                let _ = std::fs::remove_file(path);
+            }
+            println!("Removed {} residual files.", residual.len());
+        }
+        CleanupChoice::Keep => println!("Kept {} residual files.", residual.len()),
+    }
+    Ok(())
 }
 
 /// Filters explicit files, warning on invalid ones, and canonicalizes them.

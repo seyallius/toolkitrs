@@ -3,20 +3,16 @@
 
 use crate::{
     cli,
-    commands::workers,
+    commands::{batch, workers},
     components::{
         banner, progress,
-        prompt::{
-            self, execution_mode_choice, CleanupChoice, ContinueChoice, ExecutionMode,
-            SiblingBatchChoice,
-        },
+        prompt::{self, ContinueChoice, ExecutionMode},
         spinner::{Spinner, SpinnerStyle},
     },
     ffmpeg::{args, Ffmpeg, ProcessRunner},
     util::{
         batch::{BatchPolicy, BatchReport},
         files,
-        parallel::{self, BatchEvent, BatchSummary},
     },
 };
 use anyhow::{bail, Context, Result};
@@ -24,10 +20,9 @@ use clap::Args;
 use console::Style;
 use std::{
     fs,
-    io::{self, BufReader, IsTerminal},
+    io::{self, BufReader},
     path::{Path, PathBuf},
 };
-use tokio_util::sync::CancellationToken;
 
 // --------------------------------- Types, Constants & Variables ------------------------------- //
 
@@ -39,12 +34,6 @@ const DEFAULT_POST_CHOICE: usize = 2;
 
 /// Extension scanned for batch video discovery.
 const MP4_EXT: &str = "mp4";
-
-/// Suffix used by vidwrap outputs.
-///
-/// We exclude these from batch discovery so a directory scan does not
-/// repeatedly re-wrap previously generated `*_with_image.mp4` files.
-const VIDWRAP_OUTPUT_STEM_SUFFIX: &str = "_with_image";
 
 /// Arguments for the `vidwrap` subcommand.
 ///
@@ -87,19 +76,16 @@ pub struct VidwrapArgs {
 /// Resolved execution plan for vidwrap.
 ///
 /// This separates queue construction from execution, which makes the command
-/// easier to reason about and easier to test later.
+/// easier to reason about and easier to test later. The interactive
+/// post-processing prompt runs exactly when `policy` is [`BatchPolicy::Single`]
+/// (true single-file mode); batch modes keep both files automatically to
+/// avoid prompting destructively per file.
 struct VidwrapPlan {
     /// Videos to process, in processing order.
     queue: Vec<PathBuf>,
 
     /// Policy for errors and continuation.
     policy: BatchPolicy,
-
-    /// Whether the original single-file post-processing prompt should run.
-    ///
-    /// This is enabled only for true single-file mode. In batch mode we keep
-    /// both files automatically to avoid prompting destructively per file.
-    interactive_post: bool,
 }
 
 // ----------------------------------------- Public API ----------------------------------------- //
@@ -133,29 +119,13 @@ pub fn run<R: ProcessRunner>(args_cli: VidwrapArgs, ffmpeg: &Ffmpeg<R>) -> Resul
         return Ok(());
     }
 
-    // Decide sequential vs parallel.
-    let mode = if plan.queue.len() <= 1 {
-        ExecutionMode::Sequential
-    } else if let Some(m) = args_cli.mode {
-        match m {
-            cli::ExecutionModeCli::Sequential => ExecutionMode::Sequential,
-            cli::ExecutionModeCli::Parallel => ExecutionMode::Parallel,
-        }
-    } else {
-        let stdin = io::stdin();
-        let mut input = BufReader::new(stdin.lock());
-        let mut stdout = io::stdout();
-        execution_mode_choice(
-            &mut input,
-            &mut stdout,
-            plan.queue.len(),
-            parallel::num_cpus(),
-        )?
-    };
-
-    match mode {
+    match batch::resolve_execution_mode(plan.queue.len(), args_cli.mode)? {
         ExecutionMode::Sequential => execute_plan(plan, ffmpeg),
-        ExecutionMode::Parallel => execute_plan_parallel(plan, ffmpeg),
+        ExecutionMode::Parallel => {
+            // vidwrap's ffmpeg arguments always overwrite, so force = true.
+            let job = workers::vidwrap_job(true, ffmpeg.binary());
+            batch::run_parallel_console("Vidwrap", plan.queue, job)
+        }
     }
 }
 
@@ -163,6 +133,8 @@ pub fn run<R: ProcessRunner>(args_cli: VidwrapArgs, ffmpeg: &Ffmpeg<R>) -> Resul
 
 /// Resolves the execution plan from CLI arguments and interactive prompts.
 fn resolve_plan(args_cli: &VidwrapArgs) -> Result<VidwrapPlan> {
+    let exclude = Some(files::VIDWRAP_OUTPUT_STEM_SUFFIX);
+
     match (&args_cli.video, &args_cli.input_dir, args_cli.batch) {
         (Some(video), None, false) => {
             if args_cli.on_error.is_some() {
@@ -174,10 +146,16 @@ fn resolve_plan(args_cli: &VidwrapArgs) -> Result<VidwrapPlan> {
         (Some(_), _, _) => {
             bail!("VIDEO cannot be combined with --batch or --input-dir. Omit VIDEO to scan a directory.")
         }
-        (None, Some(dir), _) => resolve_directory(dir, args_cli.on_error),
+        (None, Some(dir), _) => {
+            let (queue, policy) =
+                batch::resolve_directory_queue(dir, MP4_EXT, exclude, args_cli.on_error)?;
+            Ok(VidwrapPlan { queue, policy })
+        }
         (None, None, true) => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            resolve_directory(&cwd, args_cli.on_error)
+            let (queue, policy) =
+                batch::resolve_directory_queue(&cwd, MP4_EXT, exclude, args_cli.on_error)?;
+            Ok(VidwrapPlan { queue, policy })
         }
         (None, None, false) => {
             bail!("provide VIDEO, or use --batch / --input-dir <DIR>")
@@ -193,68 +171,12 @@ fn resolve_plan(args_cli: &VidwrapArgs) -> Result<VidwrapPlan> {
 /// - process whole path, skip on error
 /// - process whole path, prompt each
 fn resolve_explicit_video(video: &Path) -> Result<VidwrapPlan> {
-    let video = video
-        .canonicalize()
-        .with_context(|| format!("video file not found: {}", video.display()))?;
-
-    let queue = files::queue_from_entry(&video, MP4_EXT, Some(VIDWRAP_OUTPUT_STEM_SUFFIX))?;
-
-    if queue.len() <= 1 {
-        return Ok(VidwrapPlan {
-            queue: vec![video],
-            policy: BatchPolicy::Single,
-            interactive_post: true,
-        });
-    }
-
-    let parent = video.parent().context("video has no parent")?;
-
-    let stdin = io::stdin();
-    let mut input = BufReader::new(stdin.lock());
-    let mut stdout = io::stdout();
-
-    let choice = prompt::sibling_batch_choice(&mut input, &mut stdout, parent, queue.len())?;
-
-    let (policy, queue, interactive_post) = match choice {
-        SiblingBatchChoice::ProcessInputOnly => (BatchPolicy::Single, vec![video], true),
-        SiblingBatchChoice::ProcessAllStopOnError => (BatchPolicy::StopOnError, queue, false),
-        SiblingBatchChoice::ProcessAllSkipOnError => (BatchPolicy::SkipOnError, queue, false),
-        SiblingBatchChoice::ProcessAllPromptEach => (BatchPolicy::PromptEach, queue, false),
-    };
-
-    Ok(VidwrapPlan {
-        queue,
-        policy,
-        interactive_post,
-    })
-}
-
-/// Resolves a plan for explicit directory batch mode.
-fn resolve_directory(dir: &Path, on_error: Option<cli::BatchOnError>) -> Result<VidwrapPlan> {
-    let dir = dir
-        .canonicalize()
-        .with_context(|| format!("directory not found: {}", dir.display()))?;
-
-    let queue = files::queue_from_directory(&dir, MP4_EXT, Some(VIDWRAP_OUTPUT_STEM_SUFFIX))?;
-
-    let policy = match on_error {
-        Some(cli::BatchOnError::Stop) => BatchPolicy::StopOnError,
-        Some(cli::BatchOnError::Skip) => BatchPolicy::SkipOnError,
-        Some(cli::BatchOnError::Prompt) => BatchPolicy::PromptEach,
-        None => {
-            if io::stdin().is_terminal() {
-                BatchPolicy::PromptEach
-            } else {
-                BatchPolicy::SkipOnError
-            }
-        }
-    };
-
-    Ok(VidwrapPlan {
-        queue,
-        policy,
-        interactive_post: false,
-    })
+    let (queue, policy) = batch::resolve_single_file_with_siblings(
+        MP4_EXT,
+        Some(files::VIDWRAP_OUTPUT_STEM_SUFFIX),
+        video,
+    )?;
+    Ok(VidwrapPlan { queue, policy })
 }
 
 /// Executes the resolved vidwrap plan.
@@ -275,7 +197,7 @@ fn execute_plan<R: ProcessRunner>(plan: VidwrapPlan, ffmpeg: &Ffmpeg<R>) -> Resu
             println!("Video {}/{}: {}", index + 1, total, video.display());
         }
 
-        match process_one(&video, ffmpeg, plan.interactive_post && total == 1) {
+        match process_one(&video, ffmpeg, is_single) {
             Ok(_) => {
                 report.record_success(video.clone());
             }
@@ -362,7 +284,7 @@ Found video: {}",
         video.display()
     );
 
-    let output = output_path_for(&video)?;
+    let output = files::output_path_for_video_with_image(&video)?;
 
     let label = "Creating video with static image".to_string();
     println!("{}", progress::render(1, TOTAL_STEPS, &label));
@@ -394,20 +316,6 @@ Found video: {}",
     }
 
     Ok(output)
-}
-
-/// Computes the vidwrap output path for a video.
-///
-/// Example:
-/// `/videos/input.mp4` -> `/videos/input_with_image.mp4`
-fn output_path_for(video: &Path) -> Result<PathBuf> {
-    let dir = video.parent().context("video has no parent")?;
-    let stem = video
-        .file_stem()
-        .context("video has no stem")?
-        .to_string_lossy();
-
-    Ok(dir.join(format!("{stem}{VIDWRAP_OUTPUT_STEM_SUFFIX}.mp4")))
 }
 
 /// Prompts the user for post-processing actions on the original video and image.
@@ -446,116 +354,5 @@ fn post_process(original: &Path, image: &Path, new_video: &Path) -> Result<()> {
         _ => println!("Kept all files"),
     }
 
-    Ok(())
-}
-
-/// Executes the resolved plan in parallel mode.
-fn execute_plan_parallel<R: ProcessRunner>(plan: VidwrapPlan, ffmpeg: &Ffmpeg<R>) -> Result<()> {
-    let binary = ffmpeg.binary().to_path_buf();
-    let queue = plan.queue.clone();
-    let cancel = CancellationToken::new();
-
-    // Ctrl+C handler
-    let cancel_clone = cancel.clone();
-    let _ctrl_c = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        rt.block_on(async {
-            let _ = tokio::signal::ctrl_c().await;
-            eprintln!("\nCancellation requested...");
-            cancel_clone.cancel();
-        });
-        Ok::<_, anyhow::Error>(())
-    });
-
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BatchEvent>();
-    let binary_for_worker = binary.clone();
-    let worker = move |input: PathBuf, task_cancel: CancellationToken| {
-        let binary = binary_for_worker.clone();
-        async move { workers::vidwrap(input, &binary, task_cancel).await }
-    };
-
-    let runner_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let queue_for_runner = queue.clone();
-    let runner_handle = runner_rt.spawn(parallel::run_parallel(
-        queue_for_runner,
-        parallel::num_cpus(),
-        cancel.clone(),
-        event_tx,
-        worker,
-    ));
-
-    let mut started = std::collections::HashSet::new();
-    let mut succeeded = std::collections::HashSet::new();
-    let mut failed = 0usize;
-    let mut summary = BatchSummary::default();
-
-    runner_rt.block_on(async {
-        while let Some(event) = event_rx.recv().await {
-            match event {
-                BatchEvent::Started(i) => {
-                    started.insert(i);
-                    println!("▶ Started [{}]: {}", i + 1, queue[i].display());
-                }
-                BatchEvent::Done(i, worker_result) => {
-                    if worker_result.is_success() {
-                        if let Some(p) = worker_result.path {
-                            println!("✔ Success [{}]: {}", i + 1, p.display());
-                            succeeded.insert(i);
-                        }
-                    } else if let Some(e) = worker_result.error {
-                        if e == "cancelled" {
-                            eprintln!("⊗ Cancelled [{}]: {}", i + 1, queue[i].display());
-                        } else {
-                            eprintln!("✖ Failed [{}]: {e}", i + 1);
-                            failed += 1;
-                        }
-                    }
-                }
-                BatchEvent::AllDone(s) => {
-                    summary = s;
-                    break;
-                }
-            }
-        }
-    });
-    let _ = runner_handle;
-
-    if summary.cancelled {
-        // For vidwrap, outputs are next to inputs with `_with_image.mp4` suffix.
-        let residual: Vec<PathBuf> = started
-            .iter()
-            .filter(|i| !succeeded.contains(i))
-            .filter_map(|i| {
-                let input = &queue[*i];
-                let dir = input.parent()?;
-                let stem = input.file_stem()?.to_string_lossy();
-                let out = dir.join(format!("{stem}_with_image.mp4"));
-                out.exists().then_some(out)
-            })
-            .collect();
-
-        if !residual.is_empty() {
-            let stdin = io::stdin();
-            let mut input = BufReader::new(stdin.lock());
-            let mut stdout = io::stdout();
-            if matches!(
-                prompt::cleanup_residual_choice(&mut input, &mut stdout, &residual)?,
-                CleanupChoice::Remove
-            ) {
-                for p in &residual {
-                    let _ = fs::remove_file(p);
-                }
-                println!("Removed {} residual files.", residual.len());
-            }
-        }
-    }
-
-    if summary.failed > 0 {
-        bail!("one or more vidwrap operations failed");
-    }
     Ok(())
 }

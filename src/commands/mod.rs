@@ -15,8 +15,6 @@ use crate::{
 };
 use anyhow::Result;
 
-// ----------------------------------------- Public API ----------------------------------------- //
-
 /// Dispatches the selected subcommand.
 ///
 /// New commands need one enum variant and one arm here.

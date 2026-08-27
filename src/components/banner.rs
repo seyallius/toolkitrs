@@ -25,11 +25,21 @@ pub fn render(title: &str, subtitle: Option<&str>, color: bool) -> String {
         return format!("== {content} ==");
     }
 
+    render_box(&content, color)
+}
+
+// -------------------------------------- Internal Helpers -------------------------------------- //
+
+/// Renders the unicode-box banner form used on terminals.
+///
+/// Split out from [`render`] so the box layout itself is testable without
+/// depending on whether the test runner owns a TTY.
+fn render_box(content: &str, color: bool) -> String {
     let border = "═".repeat(content.chars().count() + 2);
     let title = if color {
         Style::new().cyan().bold().apply_to(content).to_string()
     } else {
-        content
+        content.to_owned()
     };
     format!("╔{border}╗\n║ {title} ║\n╚{border}╝")
 }
@@ -39,6 +49,6 @@ mod tests {
     use super::*;
     #[test]
     fn renders_box() {
-        assert!(render("Hello", None, false).contains("║ Hello ║"));
+        assert!(render_box("Hello", false).contains("║ Hello ║"));
     }
 }

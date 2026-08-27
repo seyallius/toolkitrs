@@ -8,8 +8,6 @@ use crate::commands::{
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-// -------------------------------------------- Types ------------------------------------------- //
-
 /// Command line entry point for the toolkitrs.
 ///
 /// Global options defined here apply to all subcommands automatically.

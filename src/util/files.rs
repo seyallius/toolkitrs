@@ -14,6 +14,12 @@ use std::{
 /// Supported image extensions for companion image lookup.
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "gif", "webp"];
 
+/// Suffix appended to the source stem for vidwrap outputs.
+///
+/// Also excluded from batch discovery so a directory scan does not
+/// repeatedly re-wrap previously generated `*_with_image.mp4` files.
+pub const VIDWRAP_OUTPUT_STEM_SUFFIX: &str = "_with_image";
+
 /// Prefix prepended to each extension in error messages.
 const EXTENSION_DISPLAY_PREFIX: &str = ".";
 
@@ -66,7 +72,13 @@ pub fn companion_image(video: &Path) -> Result<PathBuf> {
         .parent()
         .unwrap_or_else(|| Path::new(FALLBACK_PARENT_DIR));
     for ext in IMAGE_EXTENSIONS {
-        let candidate = parent.join(stem).with_extension(ext);
+        // Append the extension to the full stem instead of using
+        // `with_extension`, which would replace everything after the last
+        // dot (breaking names like "a [x].video.mp4").
+        let mut name = stem.to_os_string();
+        name.push(".");
+        name.push(ext);
+        let candidate = parent.join(name);
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -224,13 +236,17 @@ pub fn temp_path(prefix: &str, suffix: &str) -> Result<PathBuf> {
 }
 
 /// Computes the vidwrap output path next to the source video.
+///
+/// Example: `/videos/input.mp4` -> `/videos/input_with_image.mp4`
 pub fn output_path_for_video_with_image(video: &Path) -> Result<PathBuf> {
     let dir = video.parent().context("video has no parent")?;
-    let stem = video
+    let mut name = video
         .file_stem()
         .context("video has no stem")?
-        .to_string_lossy();
-    Ok(dir.join(format!("{stem}_with_image.mp4")))
+        .to_os_string();
+    name.push(VIDWRAP_OUTPUT_STEM_SUFFIX);
+    name.push(".mp4");
+    Ok(dir.join(name))
 }
 
 #[cfg(test)]

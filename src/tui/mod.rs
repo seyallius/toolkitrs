@@ -21,7 +21,11 @@ use crossterm::{self, cursor, event as crossterm_event, terminal};
 use ratatui::{self, backend};
 use std::{io, path::PathBuf, sync::mpsc, time::Duration};
 
+// --------------------------------- Types, Constants & Variables ------------------------------- //
+
 const RECV_TIMEOUT: Duration = Duration::from_millis(250);
+
+// ------------------------------------------ Types & Impls ------------------------------------- //
 
 /// RAII guard that always restores the terminal, even on early `?` returns.
 ///
@@ -40,6 +44,8 @@ impl Drop for TerminalGuard {
         );
     }
 }
+
+// ----------------------------------------- Public API ----------------------------------------- //
 
 /// Starts the TUI event loop and blocks until the user quits.
 ///
@@ -75,6 +81,8 @@ pub fn run(ffmpeg_path: Option<PathBuf>) -> Result<()> {
     result
 }
 
+// -------------------------------------- Internal Helpers -------------------------------------- //
+
 /// Drives the render/update cycle until the app requests a quit.
 ///
 /// `recv_timeout` doubles as our tick source: when nothing arrives for
@@ -100,11 +108,6 @@ fn event_loop(
             Ok(AppEvent::FileDone(i, ok)) => app.file_done(i, ok),
             Ok(AppEvent::AllDone { succeeded, failed }) => app.all_done(succeeded, failed),
             Ok(AppEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => app.tick(),
-            Ok(AppEvent::CancelAll) => {
-                if let Some(token) = &app.cancel_token {
-                    token.cancel();
-                }
-            }
             Ok(AppEvent::CancelledWithResidual(files)) => {
                 app.running = false;
                 app.finished = true;

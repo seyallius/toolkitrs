@@ -12,10 +12,14 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+// --------------------------------- Types, Constants & Variables ------------------------------- //
+
 /// Number of selectable rows on the options screen.
 const OPTIONS_ROWS: usize = 6;
 /// Spinner animation frames (braille dots).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+// ------------------------------------------ Types & Impls ------------------------------------- //
 
 /// Which screen is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +71,6 @@ pub struct RunOptions {
     /// Cover art square size in pixels (cover workflows only).
     pub cover_size: u32,
 }
-
 impl Default for RunOptions {
     /// Sensible defaults matching the CLI's defaults.
     fn default() -> Self {

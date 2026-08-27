@@ -3,6 +3,8 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
+// ---------------------------------------------- Types ----------------------------------------- //
+
 /// Decision for what to do when a single video is supplied but sibling videos exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SiblingBatchChoice {
@@ -49,6 +51,8 @@ pub enum CleanupChoice {
     /// Keep them as-is.
     Keep,
 }
+
+// ----------------------------------------- Public API ----------------------------------------- //
 
 /// Parse a yes/no response, falling back to `default` for unknown input.
 #[allow(dead_code)]

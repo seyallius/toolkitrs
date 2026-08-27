@@ -10,10 +10,14 @@ use ratatui::{
     Frame,
 };
 
+// --------------------------------- Types, Constants & Variables ------------------------------- //
+
 /// Accent color used for highlights and selections.
 const ACCENT: Color = Color::Cyan;
 /// Dim color for secondary text.
 const DIM: Color = Color::DarkGray;
+
+// ----------------------------------------- Public API ----------------------------------------- //
 
 /// Draws the entire frame based on the current app state.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -36,6 +40,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     render_footer(f, app, chunks[2]);
 }
+
+// -------------------------------------- Internal Helpers -------------------------------------- //
 
 /// Renders the boxed header with app title and a breadcrumb.
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
@@ -156,7 +162,7 @@ fn render_picker(f: &mut Frame, app: &App, area: Rect) {
 /// Renders the options list with current values.
 fn render_options(f: &mut Frame, app: &App, area: Rect) {
     let wf = app.selected_workflow;
-    let rows = vec![
+    let rows = [
         format!(
             "Force overwrite      : {}",
             if app.options.force { "ON" } else { "OFF" }
@@ -362,14 +368,25 @@ fn render_cleanup_popup(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Helper for centering a rect inside `r`.
+///
+/// Splits vertically first (top band, popup band, bottom band), then
+/// horizontally inside the popup band (left, popup, right).
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let layout = Layout::default()
+    let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage((100 - percent_y) / 2),
             Constraint::Percentage(percent_y),
             Constraint::Percentage((100 - percent_y) / 2),
-        ]);
-    let popup_layout = layout.split(r);
-    layout.split(popup_layout[1])[1]
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }

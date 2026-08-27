@@ -21,9 +21,7 @@ macro_rules! args {
     };
     // One or more arguments
     ($($arg:expr),+ $(,)?) => {{
-        let mut v = Vec::new();
-        $(v.push($arg.to_string());)*
-        v
+        vec![$($arg.to_string()),+]
     }};
 }
 
@@ -207,10 +205,13 @@ impl FfmpegArgs {
 
     // -------- Stream specifications -------------------------------------------
 
-    /// Add a stream disposition (`-disposition`).
+    /// Add a stream disposition (`-disposition:<spec> <value>`).
+    ///
+    /// The stream specifier belongs on the option name — ffmpeg rejects
+    /// the combined `-disposition v:0:attached_pic` form.
     pub fn disposition(mut self, stream_spec: &str, value: &str) -> Self {
         self.args
-            .extend(args!["-disposition", format!("{}:{}", stream_spec, value)]);
+            .extend(args![format!("-disposition:{}", stream_spec), value]);
         self
     }
 
@@ -695,12 +696,6 @@ fn path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Returns `-y` or `-n` based on the `force` flag.
-#[deprecated(since = "0.1.6", note = "use FfmpegArgs::overwrite_if")]
-fn overwrite(force: bool) -> Vec<String> {
-    args![if force { "-y" } else { "-n" }]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,10 +716,10 @@ mod tests {
             320,
             true,
         );
-        // check that -disposition v:0 attached_pic appears somewhere
+        // check that -disposition:v:0 attached_pic appears somewhere
         assert!(a
-            .windows(3)
-            .any(|x| x == ["-disposition", "v:0", "attached_pic"]));
+            .windows(2)
+            .any(|x| x == ["-disposition:v:0", "attached_pic"]));
     }
 
     #[test]

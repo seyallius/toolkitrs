@@ -1,13 +1,18 @@
 //! module mp32mp4 - Convert MP3 files to MP4 videos with optional cover art.
 //! Converts MP3 files to MP4 videos with optional cover art using the batch pipeline.
 
-use crate::commands::workers;
-use crate::util::output;
 use crate::{
     cli::BatchArgs,
-    commands::batch::{run_batch, BatchTask, FileOutcome},
+    commands::{
+        batch::{
+            self, resolve_execution_mode, run_parallel_console, run_sequential, BatchTask,
+            FileOutcome,
+        },
+        workers,
+    },
+    components::prompt::ExecutionMode,
     ffmpeg::{args, Ffmpeg, ProcessRunner},
-    util::files,
+    util::{files, output},
 };
 use anyhow::Result;
 use clap::Args;
@@ -15,6 +20,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+
 // --------------------------------- Types, Constants & Variables ------------------------------- //
 
 /// Extension for MP3 audio files.
@@ -29,11 +35,7 @@ const FILE_TYPE_NAME: &str = "MP3";
 /// Default audio bitrate for MP3 encoding (kbps).
 const DEFAULT_BITRATE: u32 = 320;
 
-/// Prefix for temporary cover image files.
-const TEMP_COVER_PREFIX: &str = "toolkitrs-cover-";
-
-/// Suffix for temporary cover image files.
-const TEMP_COVER_SUFFIX: &str = ".jpg";
+// ------------------------------------------ Types & Impls ------------------------------------- //
 
 /// Arguments for the `mp32mp4` subcommand.
 #[derive(Debug, Args)]
@@ -74,79 +76,6 @@ struct Mp3ToMp4Task {
     /// Whether to skip files without embedded cover art.
     no_cover_fallback: bool,
 }
-
-// ----------------------------------------- Public API ----------------------------------------- //
-
-/// Runs the MP3 to MP4 conversion using the generic batch pipeline.
-pub fn run<R: ProcessRunner>(args_cli: Mp32mp4Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
-    use crate::commands::batch::{
-        resolve_execution_mode, resolve_queue_only, run_batch, run_batch_parallel,
-    };
-    use crate::components::prompt::ExecutionMode;
-
-    let task = Mp3ToMp4Task {
-        bitrate: args_cli.bitrate,
-        force: args_cli.batch.force,
-        no_cover_fallback: args_cli.no_cover_fallback,
-    };
-    let (queue, _) = resolve_queue_only(&task, &args_cli.batch, args_cli.files.clone())?;
-
-    if queue.is_empty() {
-        println!(
-            "{}",
-            crate::components::banner::render(
-                "MP3",
-                Some("Batch Processing"),
-                console::colors_enabled()
-            )
-        );
-        println!("No MP3 files found to process.");
-        return Ok(());
-    }
-
-    let mode = resolve_execution_mode(queue.len(), args_cli.batch.mode)?;
-
-    match mode {
-        ExecutionMode::Sequential => run_batch(&task, &args_cli.batch, args_cli.files, ffmpeg),
-        ExecutionMode::Parallel => {
-            let bitrate = args_cli.bitrate;
-            let force = args_cli.batch.force;
-            let no_cover_fallback = args_cli.no_cover_fallback;
-            let output_dir = args_cli.batch.output_dir.clone();
-            let binary = ffmpeg.binary().to_path_buf();
-
-            run_batch_parallel("MP3", queue, &output_dir, "mp4", force, &binary, {
-                let output_dir = output_dir.clone(); // Clone for the closure
-                let binary = binary.clone(); // Clone for the closure
-                let force = force; // Copy (bool is Copy)
-
-                move |input, cancel| {
-                    let out = output::output_path(&input, &output_dir, "mp4")
-                        .unwrap_or_else(|_| input.with_extension("mp4"));
-                    let binary = binary.clone();
-                    async move {
-                        if out.exists() && !force {
-                            return Ok(out);
-                        }
-                        workers::mp32mp4(
-                            input,
-                            out,
-                            bitrate,
-                            force,
-                            no_cover_fallback,
-                            &binary,
-                            cancel,
-                        )
-                        .await
-                    }
-                }
-            })
-        }
-    }
-}
-
-// -------------------------------------- Internal Helpers -------------------------------------- //
-
 impl BatchTask for Mp3ToMp4Task {
     fn input_extension(&self) -> &str {
         MP3_EXT
@@ -166,7 +95,7 @@ impl BatchTask for Mp3ToMp4Task {
         output: &Path,
         ffmpeg: &Ffmpeg<R>,
     ) -> Result<FileOutcome> {
-        let cover = files::temp_path(TEMP_COVER_PREFIX, TEMP_COVER_SUFFIX)?;
+        let cover = files::temp_path(workers::TEMP_COVER_PREFIX, workers::TEMP_COVER_SUFFIX)?;
         let has_cover = match ffmpeg.run(args::extract_embedded_cover(input, &cover)) {
             Ok(_) => {
                 // FFmpeg succeeded, check if the file has content
@@ -203,5 +132,41 @@ impl BatchTask for Mp3ToMp4Task {
 
         let _ = fs::remove_file(&cover);
         Ok(FileOutcome::Success)
+    }
+}
+
+// ----------------------------------------- Public API ----------------------------------------- //
+
+/// Runs the MP3 to MP4 conversion using the generic batch pipeline.
+///
+/// The queue and error policy are resolved once, then dispatched to either
+/// the sequential or the parallel runner.
+pub fn run<R: ProcessRunner>(args_cli: Mp32mp4Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
+    let task = Mp3ToMp4Task {
+        bitrate: args_cli.bitrate,
+        force: args_cli.batch.force,
+        no_cover_fallback: args_cli.no_cover_fallback,
+    };
+
+    // One resolution pass: queue + error policy (may prompt for siblings).
+    let (queue, policy) = batch::resolve_queue(&task, &args_cli.batch, args_cli.files.clone())?;
+
+    if queue.is_empty() {
+        return batch::report_empty_queue(FILE_TYPE_NAME);
+    }
+
+    match resolve_execution_mode(queue.len(), args_cli.batch.mode)? {
+        ExecutionMode::Sequential => run_sequential(&task, &args_cli.batch, queue, policy, ffmpeg),
+        ExecutionMode::Parallel => {
+            output::ensure_directory(&args_cli.batch.output_dir)?;
+            let job = workers::mp32mp4_job(
+                &args_cli.batch.output_dir,
+                args_cli.bitrate,
+                args_cli.batch.force,
+                args_cli.no_cover_fallback,
+                ffmpeg.binary(),
+            );
+            run_parallel_console(FILE_TYPE_NAME, queue, job)
+        }
     }
 }

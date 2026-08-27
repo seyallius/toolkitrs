@@ -5,7 +5,7 @@ use crate::{
     cli::BatchArgs,
     commands::{
         batch::{
-            resolve_execution_mode, resolve_queue_only, run_batch, run_batch_parallel, BatchTask,
+            self, resolve_execution_mode, run_parallel_console, run_sequential, BatchTask,
             FileOutcome,
         },
         workers,
@@ -53,61 +53,6 @@ struct Ts2Mp4Task {
     /// Whether to force overwrite existing files.
     force: bool,
 }
-
-// ----------------------------------------- Public API ----------------------------------------- //
-
-pub fn run<R: ProcessRunner>(args_cli: Ts2mp4Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
-    let task = Ts2Mp4Task {
-        force: args_cli.batch.force,
-    };
-    let (queue, _policy) = resolve_queue_only(&task, &args_cli.batch, args_cli.files.clone())?;
-
-    if queue.is_empty() {
-        println!(
-            "{}",
-            crate::components::banner::render(
-                "TS",
-                Some("Batch Processing"),
-                console::colors_enabled()
-            )
-        );
-        println!("No TS files found to process.");
-        return Ok(());
-    }
-
-    let mode = resolve_execution_mode(queue.len(), args_cli.batch.mode)?;
-
-    match mode {
-        ExecutionMode::Sequential => run_batch(&task, &args_cli.batch, args_cli.files, ffmpeg),
-        ExecutionMode::Parallel => {
-            let force = args_cli.batch.force;
-            let output_dir = args_cli.batch.output_dir.clone();
-            let binary = ffmpeg.binary().to_path_buf();
-
-            run_batch_parallel("TS", queue, &output_dir, "mp4", force, &binary, {
-                let output_dir = output_dir.clone(); // Clone for the closure
-                let binary = binary.clone(); // Clone for the closure
-                let force = force; // Copy (bool is Copy)
-
-                move |input, cancel| {
-                    let out = output::output_path(&input, &output_dir, "mp4")
-                        .unwrap_or_else(|_| input.with_extension("mp4"));
-                    let force = force;
-                    let binary = binary.clone();
-                    async move {
-                        if out.exists() && !force {
-                            return Ok(out);
-                        }
-                        workers::ts2mp4(input, out, force, &binary, cancel).await
-                    }
-                }
-            })
-        }
-    }
-}
-
-// -------------------------------------- Internal Helpers -------------------------------------- //
-
 impl BatchTask for Ts2Mp4Task {
     fn input_extension(&self) -> &str {
         TS_EXT
@@ -129,5 +74,37 @@ impl BatchTask for Ts2Mp4Task {
     ) -> Result<FileOutcome> {
         ffmpeg.run(args::remux_copy(input, output, self.force))?;
         Ok(FileOutcome::Success)
+    }
+}
+
+// ----------------------------------------- Public API ----------------------------------------- //
+
+/// Runs the TS → MP4 conversion using the generic batch pipeline.
+///
+/// The queue and error policy are resolved once, then dispatched to either
+/// the sequential or the parallel runner.
+pub fn run<R: ProcessRunner>(args_cli: Ts2mp4Args, ffmpeg: &Ffmpeg<R>) -> Result<()> {
+    let task = Ts2Mp4Task {
+        force: args_cli.batch.force,
+    };
+
+    // One resolution pass: queue + error policy (may prompt for siblings).
+    let (queue, policy) = batch::resolve_queue(&task, &args_cli.batch, args_cli.files.clone())?;
+
+    if queue.is_empty() {
+        return batch::report_empty_queue(FILE_TYPE_NAME);
+    }
+
+    match resolve_execution_mode(queue.len(), args_cli.batch.mode)? {
+        ExecutionMode::Sequential => run_sequential(&task, &args_cli.batch, queue, policy, ffmpeg),
+        ExecutionMode::Parallel => {
+            output::ensure_directory(&args_cli.batch.output_dir)?;
+            let job = workers::ts2mp4_job(
+                &args_cli.batch.output_dir,
+                args_cli.batch.force,
+                ffmpeg.binary(),
+            );
+            run_parallel_console(FILE_TYPE_NAME, queue, job)
+        }
     }
 }
