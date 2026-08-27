@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/seyallius/toolkitrs/compare/v0.1.10...v0.1.11) - 2026-08-27
+
+### Added
+
+- *(batch)* add parallel execution with cancellation
+
+### Fixed
+
+- *(ffmpeg)* avoid SIGPIPE when stderr is not consumed in async runner
+- *(installer)* update PATH in current session and add fallback dir
+- *(installer)* include version in release asset filenames
+
+### Other
+
+- *(readme)* add download badges and fix formatting
+
 ## [0.1.10](https://github.com/seyallius/toolkitrs/compare/v0.1.9...v0.1.10) - 2026-08-24
 
 ### Added
