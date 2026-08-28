@@ -4,3 +4,5 @@ toolkit_*.txt
 ***.exe
 ***.bat
 target
+gh-contrib
+gh-contrib.exe

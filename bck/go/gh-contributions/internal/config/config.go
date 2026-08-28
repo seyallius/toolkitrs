@@ -1,3 +1,5 @@
+// Package config. config.go - Handles configuration creation and validation
+// for the GitHub contributions fetcher, including environment variable checks.
 package config
 
 import (
@@ -5,51 +7,51 @@ import (
 	"gh_contrib/internal/types"
 	"net/http"
 	"os"
-	"slices"
 	"time"
 )
 
-// ParseConfig parses command-line arguments and environment variables to build
-// the application configuration.
+// NewConfig creates and validates a new configuration from the provided parameters.
+// It checks that the GITHUB_TOKEN environment variable is set and validates
+// the date formats.
 //
-// Expected command-line arguments:
-//   - os.Args[1]: GitHub username
-//   - os.Args[2]: Start date (YYYY-MM-DD)
-//   - os.Args[3]: End date (YYYY-MM-DD)
-//
-// Environment variables:
-//   - GITHUB_TOKEN: GitHub personal access token (required)
+// Parameters:
+//   - username: GitHub username
+//   - since: Start date in YYYY-MM-DD format
+//   - until: End date in YYYY-MM-DD format
+//   - fetchReadme: Whether to fetch README files
 //
 // Returns:
-//   - *Config: The parsed configuration
-//   - error: Any validation or parsing error
-func ParseConfig() (*types.Config, error) {
-	if len(os.Args) < 4 {
-		return nil, fmt.Errorf(
-			"usage: go run gh_contrib.go <username> <since> <until>\n" +
-				"  Format: YYYY-MM-DD\n" +
-				"  Example: go run gh_contrib.go seyallius 2026-01-01 2026-08-27",
-		)
-	}
-
+//   - *types.Config: The validated configuration
+//   - error: Any validation error
+func NewConfig(username, since, until string, fetchReadme bool) (*types.Config, error) {
+	// Validate token
 	token := os.Getenv(types.EnvToken)
 	if token == "" {
 		return nil, fmt.Errorf("%s environment variable required\n"+
-			"Get token at: https://github.com/settings/tokens (scope: repo)", types.EnvToken)
+			"Get token at: https://github.com/settings/tokens (scope: repo, read:user)", types.EnvToken)
 	}
 
-	FetchReadme := true
-	// Check for --no-readme flag
-	if slices.Contains(os.Args, "--no-readme") {
-		FetchReadme = false
+	// Validate dates (basic format check)
+	if _, err := time.Parse(types.DateLayout, since); err != nil {
+		return nil, fmt.Errorf("invalid since date: %w (expected YYYY-MM-DD)", err)
+	}
+	if _, err := time.Parse(types.DateLayout, until); err != nil {
+		return nil, fmt.Errorf("invalid until date: %w (expected YYYY-MM-DD)", err)
+	}
+
+	// Validate date range
+	sinceTime, _ := time.Parse(types.DateLayout, since)
+	untilTime, _ := time.Parse(types.DateLayout, until)
+	if sinceTime.After(untilTime) {
+		return nil, fmt.Errorf("since date must be before until date")
 	}
 
 	return &types.Config{
-		Username:    os.Args[1],
-		Since:       os.Args[2],
-		Until:       os.Args[3],
+		Username:    username,
+		Since:       since,
+		Until:       until,
 		Token:       token,
 		Client:      &http.Client{Timeout: 30 * time.Second},
-		FetchReadme: FetchReadme,
+		FetchReadme: fetchReadme,
 	}, nil
 }
