@@ -9,6 +9,18 @@ on:
     branches:
       - main
       - ci
+    paths-ignore:
+      - 'bck/**'
+      - 'bash/**'
+      - '.github/**'
+      - '.treeclipignore'
+      - '.gitignore'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'justfile'
+      - 'LICENSE'
+      - 'CHANGELOG.md'
+      - 'AGENTS.md'
 
 jobs:
   release:
