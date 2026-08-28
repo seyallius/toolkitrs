@@ -26,12 +26,13 @@
 package main
 
 import (
-    "encoding/base64"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -85,11 +86,12 @@ type Author struct {
 
 // Config holds the configuration and dependencies for the application.
 type Config struct {
-	Username string       // GitHub username whose commits are being fetched
-	Since    string       // Start date in YYYY-MM-DD format
-	Until    string       // End date in YYYY-MM-DD format
-	Token    string       // GitHub personal access token for authentication
-	Client   *http.Client // HTTP client with timeout configuration
+	Username    string       // GitHub username whose commits are being fetched
+	Since       string       // Start date in YYYY-MM-DD format
+	Until       string       // End date in YYYY-MM-DD format
+	Token       string       // GitHub personal access token for authentication
+	Client      *http.Client // HTTP client with timeout configuration
+	FetchReadme bool         // Should fetch README file as well
 }
 
 // CommitInfo holds the processed commit details for output.
@@ -221,12 +223,19 @@ func parseConfig() (*Config, error) {
 			"Get token at: https://github.com/settings/tokens (scope: repo)", envToken)
 	}
 
+	fetchReadme := true
+	// Check for --no-readme flag
+	if slices.Contains(os.Args, "--no-readme") {
+		fetchReadme = false
+	}
+
 	return &Config{
-		Username: os.Args[1],
-		Since:    os.Args[2],
-		Until:    os.Args[3],
-		Token:    token,
-		Client:   &http.Client{Timeout: 30 * time.Second},
+		Username:    os.Args[1],
+		Since:       os.Args[2],
+		Until:       os.Args[3],
+		Token:       token,
+		Client:      &http.Client{Timeout: 30 * time.Second},
+		FetchReadme: fetchReadme,
 	}, nil
 }
 
@@ -281,24 +290,24 @@ func fetchCommits(cfg *Config, repoName string) ([]CommitResponse, error) {
 // fetchReadme retrieves the README.md content for a repository.
 // Returns the content as a string (already decoded from base64).
 func fetchReadme(cfg *Config, repoName string) (string, error) {
-    url := fmt.Sprintf("%s/repos/%s/%s/readme", apiBaseURL, cfg.Username, repoName)
+	url := fmt.Sprintf("%s/repos/%s/%s/readme", apiBaseURL, cfg.Username, repoName)
 
-    var readmeResp struct {
-        Content string `json:"content"`
-        Encoding string `json:"encoding"`
-    }
+	var readmeResp struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
 
-    if err := doRequest(cfg, url, &readmeResp); err != nil {
-        return "", err
-    }
+	if err := doRequest(cfg, url, &readmeResp); err != nil {
+		return "", err
+	}
 
-    // GitHub returns content as base64
-    decoded, err := base64.StdEncoding.DecodeString(readmeResp.Content)
-    if err != nil {
-        return "", err
-    }
+	// GitHub returns content as base64
+	decoded, err := base64.StdEncoding.DecodeString(readmeResp.Content)
+	if err != nil {
+		return "", err
+	}
 
-    return string(decoded), nil
+	return string(decoded), nil
 }
 
 // doRequest performs an authenticated HTTP GET request to the GitHub API and
@@ -489,7 +498,7 @@ func workerWithDirectWrite(
 	for repo := range jobs {
 		fmt.Fprintf(os.Stderr, "Fetching commits for %s...\n", repo.Name)
 
-        // Fetch commits
+		// Fetch commits
 		commits, err := fetchCommits(cfg, repo.Name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", repo.Name, err)
@@ -501,12 +510,16 @@ func workerWithDirectWrite(
 			continue
 		}
 
-        // Fetch README
-        readmeContent, readmeErr := fetchReadme(cfg, repo.Name)
-        if readmeErr != nil {
-            fmt.Fprintf(os.Stderr, "  Warning: Could not fetch README for %s: %v\n", repo.Name, readmeErr)
-            readmeContent = "" // Empty on error
-        }
+		// Fetch README
+		var readmeContent string
+		if cfg.FetchReadme {
+			content, err := fetchReadme(cfg, repo.Name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: Could not fetch README for %s: %v\n", repo.Name, err)
+			} else {
+				readmeContent = content
+			}
+		}
 
 		// Write directly to file (synchronized internally)
 		writer.writeRepo(cfg.Username, repo.Name, filtered, readmeContent)
@@ -736,19 +749,19 @@ func (w *SafeFileWriter) writeRepo(username, repoName string, commits []CommitIn
 	)
 	w.file.WriteString(header)
 
-    // Write README if available
-    if readmeContent != "" {
-        w.file.WriteString("\n")
-        // Indent each line of README with 2 spaces
-        lines := strings.Split(readmeContent, "\n")
-        for _, line := range lines {
-            fmt.Fprintf(w.file, "  %s\n", line)
-        }
-        w.file.WriteString("\n")
-    }
+	// Write README if available
+	if readmeContent != "" {
+		w.file.WriteString("\n")
+		// Indent each line of README with 2 spaces
+		lines := strings.Split(readmeContent, "\n")
+		for _, line := range lines {
+			fmt.Fprintf(w.file, "  %s\n", line)
+		}
+		w.file.WriteString("\n")
+	}
 
-    // Write commits header
-    w.file.WriteString("  Commits:\n")
+	// Write commits header
+	w.file.WriteString("  Commits:\n")
 
 	// Write all commits for this repo
 	for _, commit := range commits {
