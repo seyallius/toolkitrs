@@ -30,10 +30,10 @@ struct ParallelProgress {
 
 // ----------------------------------------- Public API ----------------------------------------- //
 
-/// Spawns a worker thread that processes files (sequentially or in parallel).
+/// Spawns a Worker thread that processes files (sequentially or in parallel).
 ///
 /// Emits `FileStarted`, `Log`, `FileDone`, and finally `AllDone` events.
-pub fn spawn_worker(
+pub fn spawn_Worker(
     tx: Sender<AppEvent>,
     ffmpeg_path: PathBuf,
     workflow: Workflow,
@@ -73,14 +73,14 @@ pub fn spawn_worker(
 
         runtime.block_on(async move {
             let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BatchEvent>();
-            let worker = build_worker(workflow, workflow_options.clone(), ffmpeg_path);
+            let Worker = build_Worker(workflow, workflow_options.clone(), ffmpeg_path);
             let runner_task = tokio::spawn(parallel::run_parallel(
                 files.clone(),
                 concurrency,
                 cancel,
                 FailurePolicy::Continue,
                 event_tx,
-                worker,
+                Worker,
             ));
 
             let (progress, failed, summary) = collect_events(&tx, &mut event_rx).await;
@@ -108,8 +108,8 @@ pub fn spawn_worker(
 
 // -------------------------------------- Internal Helpers -------------------------------------- //
 
-/// Builds the workflow-specific async worker closure.
-fn build_worker(
+/// Builds the workflow-specific async Worker closure.
+fn build_Worker(
     workflow: Workflow,
     options: WorkflowOptions,
     ffmpeg_path: PathBuf,

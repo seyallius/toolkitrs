@@ -545,7 +545,7 @@ impl App {
         self.show_cleanup_prompt = false;
     }
 
-    /// Builds the file queue and spawns the background worker.
+    /// Builds the file queue and spawns the background Worker.
     fn start_run(&mut self, tx: &Sender<AppEvent>) {
         let Some(workflow) = self.selected_workflow else {
             return;
@@ -555,7 +555,7 @@ impl App {
         let cancel = CancellationToken::new();
         self.prepare_run(&files, cancel.clone());
 
-        runner::spawn_worker(
+        runner::spawn_Worker(
             tx.clone(),
             self.ffmpeg_path.clone(),
             workflow,
@@ -668,7 +668,7 @@ impl App {
         files
     }
 
-    /// Prepares the running screen state before the worker thread starts.
+    /// Prepares the running screen state before the Worker thread starts.
     fn prepare_run(&mut self, files: &[PathBuf], cancel: CancellationToken) {
         self.cancel_token = Some(cancel);
         self.file_statuses = files

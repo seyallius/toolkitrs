@@ -1,6 +1,6 @@
 //! module cancel - Shared cancellation error helpers.
 //!
-//! Long-running async workers use a typed error instead of string matching so
+//! Long-running async Workers use a typed error instead of string matching so
 //! callers can reliably distinguish user-requested cancellation from a real
 //! failure.
 
@@ -9,7 +9,7 @@ use thiserror::Error;
 
 // ---------------------------------------------- Types ----------------------------------------- //
 
-/// Typed error returned when a batch worker is cancelled.
+/// Typed error returned when a batch Worker is cancelled.
 #[derive(Debug, Error)]
 #[error("cancelled")]
 pub struct Cancelled;

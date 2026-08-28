@@ -81,7 +81,7 @@ const MOVFLAGS_FASTSTART: &str = "+faststart";
 /// Constant rate factor for x264 encoding.
 const CRF_DEFAULT: u8 = 23;
 
-/// Number of FFmpeg worker threads to auto-detect.
+/// Number of FFmpeg Worker threads to auto-detect.
 const THREADS_AUTO: &str = "auto";
 
 /// Template for scaling an image into a fixed output frame with padding.

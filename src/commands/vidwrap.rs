@@ -103,7 +103,7 @@ struct VidwrapPlan {
 /// Running state tracked while a parallel batch is active.
 #[derive(Debug, Default)]
 struct ParallelProgress {
-    /// Indices that acquired a worker slot and started running.
+    /// Indices that acquired a Worker slot and started running.
     started: HashSet<usize>,
 
     /// Indices that completed successfully.
@@ -425,7 +425,7 @@ fn execute_plan_parallel<R: ProcessRunner>(plan: VidwrapPlan, ffmpeg: &Ffmpeg<R>
     let queue = plan.queue;
     let cancel = CancellationToken::new();
     let _ctrl_c = spawn_ctrl_c_handler(cancel.clone());
-    let worker = build_parallel_worker(ffmpeg.binary().to_path_buf());
+    let Worker = build_parallel_Worker(ffmpeg.binary().to_path_buf());
     let failure_policy = parallel_failure_policy(plan.policy);
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BatchEvent>();
@@ -438,7 +438,7 @@ fn execute_plan_parallel<R: ProcessRunner>(plan: VidwrapPlan, ffmpeg: &Ffmpeg<R>
         cancel,
         failure_policy,
         event_tx,
-        worker,
+        Worker,
     ));
 
     let progress =
@@ -537,8 +537,8 @@ fn spawn_ctrl_c_handler(cancel: CancellationToken) -> JoinHandle<()> {
     })
 }
 
-/// Builds the workflow-specific worker used by the parallel executor.
-fn build_parallel_worker(
+/// Builds the workflow-specific Worker used by the parallel executor.
+fn build_parallel_Worker(
     ffmpeg_binary: PathBuf,
 ) -> impl Fn(
     PathBuf,

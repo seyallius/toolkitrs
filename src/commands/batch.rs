@@ -38,7 +38,7 @@ pub enum FileOutcome {
     Skipped(String),
 }
 
-/// Boxed future returned by async batch workers.
+/// Boxed future returned by async batch Workers.
 pub type BatchFuture = Pin<Box<dyn Future<Output = Result<PathBuf>> + Send>>;
 
 /// Trait representing a single file conversion task within a batch.
@@ -158,7 +158,7 @@ pub fn resolve_execution_mode(
     )?)
 }
 
-/// Runs a parallel batch with the given worker closure.
+/// Runs a parallel batch with the given Worker closure.
 ///
 /// This is shared by all workflows: the caller passes a closure that knows
 /// how to process one file for its specific workflow.
@@ -170,7 +170,7 @@ pub fn resolve_execution_mode(
 /// * `output_ext` - Output extension (used to pre-compute output paths for cleanup).
 /// * `force` - Overwrite existing outputs.
 /// * `ffmpeg_binary` - Path to the ffmpeg binary.
-/// * `worker` - Async closure: `(input, cancel) -> Result<PathBuf>`.
+/// * `Worker` - Async closure: `(input, cancel) -> Result<PathBuf>`.
 pub fn run_batch_parallel<F, Fut>(
     banner_title: &str,
     queue: Vec<PathBuf>,
@@ -178,7 +178,7 @@ pub fn run_batch_parallel<F, Fut>(
     output_ext: &str,
     force: bool,
     _ffmpeg_binary: &Path,
-    worker: F,
+    Worker: F,
 ) -> Result<()>
 where
     F: Fn(PathBuf, CancellationToken) -> Fut + Send + Sync + Clone + 'static,
@@ -195,10 +195,10 @@ where
 
     let output_dir = output_dir.to_path_buf();
     let output_ext = output_ext.to_string();
-    let wrapped_worker = move |input: PathBuf, cancel: CancellationToken| {
+    let wrapped_Worker = move |input: PathBuf, cancel: CancellationToken| {
         let output_dir = output_dir.clone();
         let output_ext = output_ext.clone();
-        let worker = worker.clone();
+        let Worker = Worker.clone();
         async move {
             let output = output::output_path(&input, &output_dir, &output_ext)
                 .unwrap_or_else(|_| input.with_extension(&output_ext));
@@ -208,7 +208,7 @@ where
             ) {
                 return Ok(output);
             }
-            worker(input, cancel).await
+            Worker(input, cancel).await
         }
     };
 
@@ -218,7 +218,7 @@ where
         FailurePolicy::Continue,
         String::new,
         || final_error_message("one or more conversions failed"),
-        wrapped_worker,
+        wrapped_Worker,
     )
 }
 
@@ -488,9 +488,9 @@ fn execute_queue_parallel<T: BatchTask>(
         }
     };
 
-    let worker_task = task.clone();
-    let worker = move |input: PathBuf, cancel: CancellationToken| -> BatchFuture {
-        let task = worker_task.clone();
+    let Worker_task = task.clone();
+    let Worker = move |input: PathBuf, cancel: CancellationToken| -> BatchFuture {
+        let task = Worker_task.clone();
         let output_dir = output_dir.clone();
         let binary = binary.clone();
         Box::pin(async move {
@@ -511,7 +511,7 @@ fn execute_queue_parallel<T: BatchTask>(
         failure_policy,
         || String::new(),
         || final_error_message("one or more conversions failed"),
-        worker,
+        Worker,
     )
 }
 
@@ -522,7 +522,7 @@ fn drive_parallel_batch<F, Fut, B, E>(
     failure_policy: FailurePolicy,
     mut banner_message: B,
     mut error_message: E,
-    worker: F,
+    Worker: F,
 ) -> Result<()>
 where
     F: Fn(PathBuf, CancellationToken) -> Fut + Send + Sync + Clone + 'static,
@@ -562,7 +562,7 @@ where
         cancel.clone(),
         failure_policy,
         event_tx,
-        worker,
+        Worker,
     ));
 
     let mut started = std::collections::HashSet::new();

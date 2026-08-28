@@ -1,14 +1,15 @@
-// Package main. filter.go - Provides commit filtering and message processing
+// Package filter. filter.go - Provides commit filtering and message processing
 // utilities, including filtering out merge/revert commits and splitting commit
 // messages into subject and body components.
-package main
+package filter
 
 import (
+	"gh_contrib/internal/types"
 	"strings"
 	"time"
 )
 
-// filterCommits processes raw commit responses, filtering out merge and revert commits,
+// FilterCommits processes raw commit responses, filtering out merge and revert commits,
 // and formatting the commit data for output.
 //
 // Parameters:
@@ -16,19 +17,19 @@ import (
 //
 // Returns:
 //   - []CommitInfo: Filtered and formatted commit information
-func filterCommits(commits []CommitResponse) []CommitInfo {
-	var filtered []CommitInfo
+func FilterCommits(commits []types.CommitResponse) []types.CommitInfo {
+	var filtered []types.CommitInfo
 
 	for _, c := range commits {
-		if shouldSkip(c) {
+		if ShouldSkip(c) {
 			continue
 		}
 
 		date, _ := time.Parse(time.RFC3339, c.Commit.Author.Date)
-		subject, body := splitCommitMessage(c.Commit.Message)
+		subject, body := SplitCommitMessage(c.Commit.Message)
 
-		filtered = append(filtered, CommitInfo{
-			Date:    date.Format(timeLayout),
+		filtered = append(filtered, types.CommitInfo{
+			Date:    date.Format(types.TimeLayout),
 			Subject: subject,
 			Body:    body,
 		})
@@ -37,7 +38,7 @@ func filterCommits(commits []CommitResponse) []CommitInfo {
 	return filtered
 }
 
-// shouldSkip determines whether a commit should be excluded from the output
+// ShouldSkip determines whether a commit should be excluded from the output
 // based on its message content (merge commits, revert commits, etc.).
 //
 // Parameters:
@@ -45,14 +46,14 @@ func filterCommits(commits []CommitResponse) []CommitInfo {
 //
 // Returns:
 //   - bool: True if the commit should be skipped, false otherwise
-func shouldSkip(c CommitResponse) bool {
+func ShouldSkip(c types.CommitResponse) bool {
 	msg := c.Commit.Message
 	return strings.Contains(msg, "Merge") ||
 		strings.Contains(msg, "Revert") ||
 		strings.HasPrefix(msg, "Merge ")
 }
 
-// splitCommitMessage splits a commit message into subject (first line) and body
+// SplitCommitMessage splits a commit message into subject (first line) and body
 // (remaining lines). The subject includes a trailing newline for formatting.
 //
 // Parameters:
@@ -61,7 +62,7 @@ func shouldSkip(c CommitResponse) bool {
 // Returns:
 //   - subject: The first line of the commit message
 //   - body: The remaining lines (empty if none)
-func splitCommitMessage(full string) (subject, body string) {
+func SplitCommitMessage(full string) (subject, body string) {
 	parts := strings.SplitN(full, "\n", 2)
 	subject = strings.TrimSpace(parts[0]) + "\n"
 

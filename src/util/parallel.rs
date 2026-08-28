@@ -1,6 +1,6 @@
 //! module parallel - Bounded-concurrency file processor with cancellation.
 //!
-//! Wraps tokio's task set and [`CancellationToken`] to run an async worker
+//! Wraps tokio's task set and [`CancellationToken`] to run an async Worker
 //! over many inputs in parallel, with graceful cancellation.
 //!
 //! ## When to use this
@@ -15,7 +15,7 @@
 //! ## Cancellation model
 //!
 //! Each task receives a **child** cancellation token. When the parent token
-//! fires, in-flight tasks' child tokens fire too, so workers can react (e.g.
+//! fires, in-flight tasks' child tokens fire too, so Workers can react (e.g.
 //! kill their spawned process). Tasks that have not been spawned yet are never
 //! started.
 
@@ -43,7 +43,7 @@ impl BatchSummary {
         matches!(self.termination, BatchTermination::Cancelled)
     }
 
-    /// Returns true when the batch stopped early after a worker failure.
+    /// Returns true when the batch stopped early after a Worker failure.
     pub fn stopped_on_error(&self) -> bool {
         matches!(self.termination, BatchTermination::StoppedOnError)
     }
@@ -66,7 +66,7 @@ pub enum BatchTermination {
     StoppedOnError,
 }
 
-/// Policy controlling what happens after a worker fails.
+/// Policy controlling what happens after a Worker fails.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FailurePolicy {
     /// Keep processing every file even if some fail.
@@ -93,11 +93,11 @@ pub enum BatchEvent {
 /// A cloneable wrapper for work results.
 #[derive(Debug, Clone)]
 pub enum WorkResult {
-    /// The worker completed successfully and produced an output path.
+    /// The Worker completed successfully and produced an output path.
     Success(PathBuf),
-    /// The worker failed with a user-displayable error message.
+    /// The Worker failed with a user-displayable error message.
     Failed(String),
-    /// The worker stopped because cancellation was requested.
+    /// The Worker stopped because cancellation was requested.
     Cancelled,
 }
 impl WorkResult {
@@ -146,7 +146,7 @@ impl WorkResult {
 
 // ----------------------------------------- Public API ----------------------------------------- //
 
-/// Runs `worker` over `inputs` with bounded concurrency and cancellation.
+/// Runs `Worker` over `inputs` with bounded concurrency and cancellation.
 ///
 /// # Arguments
 /// * `inputs` - Input file paths to process, in order.
@@ -154,9 +154,9 @@ impl WorkResult {
 ///   sequential (still async) execution, or [`num_cpus`] for full parallelism.
 /// * `cancel` - Cancellation token. When triggered, in-flight tasks are
 ///   asked to stop (via their child token) and pending tasks are skipped.
-/// * `failure_policy` - Whether a worker failure should stop the remaining batch.
+/// * `failure_policy` - Whether a Worker failure should stop the remaining batch.
 /// * `event_tx` - Channel for progress events (`Started`, `Done`, `AllDone`).
-/// * `worker` - Async closure: takes input path + a child cancellation
+/// * `Worker` - Async closure: takes input path + a child cancellation
 ///   token, returns the output path on success.
 ///
 /// # Returns
@@ -167,7 +167,7 @@ pub async fn run_parallel<F, Fut>(
     cancel: CancellationToken,
     failure_policy: FailurePolicy,
     event_tx: sync::mpsc::UnboundedSender<BatchEvent>,
-    worker: F,
+    Worker: F,
 ) -> BatchSummary
 where
     F: Fn(PathBuf, CancellationToken) -> Fut + Send + Sync + Clone + 'static,
@@ -182,7 +182,7 @@ where
     let mut stopped_on_error = false;
 
     while tasks.len() < limit {
-        if !spawn_next(&mut tasks, &mut pending, &batch_cancel, &event_tx, &worker) {
+        if !spawn_next(&mut tasks, &mut pending, &batch_cancel, &event_tx, &Worker) {
             break;
         }
     }
@@ -212,7 +212,7 @@ where
         }
 
         while !batch_cancel.is_cancelled() && tasks.len() < limit {
-            if !spawn_next(&mut tasks, &mut pending, &batch_cancel, &event_tx, &worker) {
+            if !spawn_next(&mut tasks, &mut pending, &batch_cancel, &event_tx, &Worker) {
                 break;
             }
         }
@@ -251,7 +251,7 @@ fn spawn_next<F, Fut>(
     pending: &mut impl Iterator<Item = (usize, PathBuf)>,
     cancel: &CancellationToken,
     event_tx: &sync::mpsc::UnboundedSender<BatchEvent>,
-    worker: &F,
+    Worker: &F,
 ) -> bool
 where
     F: Fn(PathBuf, CancellationToken) -> Fut + Send + Sync + Clone + 'static,
@@ -267,11 +267,11 @@ where
 
     let child_cancel = cancel.child_token();
     let tx = event_tx.clone();
-    let worker = worker.clone();
+    let Worker = Worker.clone();
 
     tasks.spawn(async move {
         let _ = tx.send(BatchEvent::Started(index));
-        let result = WorkResult::from_result(worker(input, child_cancel).await);
+        let result = WorkResult::from_result(Worker(input, child_cancel).await);
         let _ = tx.send(BatchEvent::Done(index, result.clone()));
         (index, result)
     });
