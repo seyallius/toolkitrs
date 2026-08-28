@@ -26,6 +26,7 @@
 package main
 
 import (
+    "encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -277,6 +278,29 @@ func fetchCommits(cfg *Config, repoName string) ([]CommitResponse, error) {
 	return commits, nil
 }
 
+// fetchReadme retrieves the README.md content for a repository.
+// Returns the content as a string (already decoded from base64).
+func fetchReadme(cfg *Config, repoName string) (string, error) {
+    url := fmt.Sprintf("%s/repos/%s/%s/readme", apiBaseURL, cfg.Username, repoName)
+
+    var readmeResp struct {
+        Content string `json:"content"`
+        Encoding string `json:"encoding"`
+    }
+
+    if err := doRequest(cfg, url, &readmeResp); err != nil {
+        return "", err
+    }
+
+    // GitHub returns content as base64
+    decoded, err := base64.StdEncoding.DecodeString(readmeResp.Content)
+    if err != nil {
+        return "", err
+    }
+
+    return string(decoded), nil
+}
+
 // doRequest performs an authenticated HTTP GET request to the GitHub API and
 // unmarshals the JSON response into the provided target.
 //
@@ -465,6 +489,7 @@ func workerWithDirectWrite(
 	for repo := range jobs {
 		fmt.Fprintf(os.Stderr, "Fetching commits for %s...\n", repo.Name)
 
+        // Fetch commits
 		commits, err := fetchCommits(cfg, repo.Name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", repo.Name, err)
@@ -476,8 +501,15 @@ func workerWithDirectWrite(
 			continue
 		}
 
+        // Fetch README
+        readmeContent, readmeErr := fetchReadme(cfg, repo.Name)
+        if readmeErr != nil {
+            fmt.Fprintf(os.Stderr, "  Warning: Could not fetch README for %s: %v\n", repo.Name, readmeErr)
+            readmeContent = "" // Empty on error
+        }
+
 		// Write directly to file (synchronized internally)
-		writer.writeRepo(cfg.Username, repo.Name, filtered)
+		writer.writeRepo(cfg.Username, repo.Name, filtered, readmeContent)
 
 		// Update counters safely
 		mu.Lock()
@@ -686,13 +718,13 @@ func (w *SafeFileWriter) writeHeader(username, since, until string) {
 }
 
 // writeRepo writes a repository's commits to the file in a thread-safe manner.
-// It writes the repository header followed by all commit entries.
+// It writes the README (if available), repository header, and all commit entries.
 //
 // Parameters:
 //   - username: The GitHub username
 //   - repoName: The repository name
 //   - commits: The list of commit information to write
-func (w *SafeFileWriter) writeRepo(username, repoName string, commits []CommitInfo) {
+func (w *SafeFileWriter) writeRepo(username, repoName string, commits []CommitInfo, readmeContent string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -703,6 +735,20 @@ func (w *SafeFileWriter) writeRepo(username, repoName string, commits []CommitIn
 		username, repoName, strings.Repeat("-", len(repoName)+len(username)+repositoryStrLen),
 	)
 	w.file.WriteString(header)
+
+    // Write README if available
+    if readmeContent != "" {
+        w.file.WriteString("\n")
+        // Indent each line of README with 2 spaces
+        lines := strings.Split(readmeContent, "\n")
+        for _, line := range lines {
+            fmt.Fprintf(w.file, "  %s\n", line)
+        }
+        w.file.WriteString("\n")
+    }
+
+    // Write commits header
+    w.file.WriteString("  Commits:\n")
 
 	// Write all commits for this repo
 	for _, commit := range commits {
