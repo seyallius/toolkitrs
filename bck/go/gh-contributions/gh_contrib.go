@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,7 @@ const (
 	apiBaseURL   = "https://api.github.com"
 	perPage      = 100
 	outputPrefix = "contributions"
+	maxWorkers   = 10 // Limit concurrent API calls to avoid rate limiting
 )
 
 type Repository struct {
@@ -52,6 +54,12 @@ type CommitInfo struct {
 	Body    string
 }
 
+type RepoResult struct {
+	RepoName string
+	Commits  []CommitInfo
+	Err      error
+}
+
 // ---------------------------------------- Main ---------------------------------------------- //
 
 func main() {
@@ -82,19 +90,50 @@ func run(cfg *Config) error {
 	}
 	defer file.Close()
 
+	// Write header once
 	writeHeader(file, cfg.Username, cfg.Since, cfg.Until)
 
-	commitsByRepo := collectCommits(cfg, repos)
-	writeCommits(file, cfg.Username, commitsByRepo)
-	writeSummary(file, commitsByRepo)
+	// Process repositories concurrently
+	results := processRepositories(cfg, repos)
+
+	// Write results as they come in (synchronized via channel)
+	totalCommits := 0
+	repoCount := 0
+
+	for result := range results {
+		if result.Err != nil {
+			fmt.Fprintf(os.Stderr, "Error processing %s: %v\n", result.RepoName, result.Err)
+			continue
+		}
+
+		if len(result.Commits) == 0 {
+			continue
+		}
+
+		repoCount++
+		totalCommits += len(result.Commits)
+
+		// Write this repo's commits immediately
+		writeRepoHeader(file, cfg.Username, result.RepoName)
+		for _, commit := range result.Commits {
+			writeCommitEntry(file, commit)
+		}
+		file.Sync() // Force flush to disk
+	}
+
+	// Write summary
+	writeSummary(file, totalCommits, repoCount)
 
 	fmt.Fprintf(os.Stderr, "\nDone! Output written to: %s\n", outputFile)
-	printSummary(commitsByRepo)
+	fmt.Fprintf(os.Stderr, "Total commits: %d\n", totalCommits)
+	fmt.Fprintf(os.Stderr, "Repositories with commits: %d\n", repoCount)
 
 	return nil
 }
 
-// ------------------------------------ Configuration ----------------------------------------- //
+// -------------------------------------- Internal Helpers -------------------------------------- //
+
+// --- Configuration
 
 func parseConfig() (*Config, error) {
 	if len(os.Args) < 4 {
@@ -114,11 +153,11 @@ func parseConfig() (*Config, error) {
 		Since:    os.Args[2],
 		Until:    os.Args[3],
 		Token:    token,
-		Client:   &http.Client{},
+		Client:   &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
-// ------------------------------------ API Calls --------------------------------------------- //
+// --- API Calls
 
 func fetchRepositories(cfg *Config) ([]Repository, error) {
 	url := fmt.Sprintf("%s/user/repos?per_page=%d&type=all", apiBaseURL, perPage)
@@ -175,38 +214,69 @@ func doRequest(cfg *Config, url string, target interface{}) error {
 	return json.Unmarshal(body, target)
 }
 
-// ------------------------------------ Data Processing --------------------------------------- //
+// --- Concurrent Processing
 
-type RepoCommits struct {
-	RepoName string
-	Commits  []CommitInfo
+func processRepositories(cfg *Config, repos []Repository) <-chan RepoResult {
+	// "Worker Pool Pattern"
+
+	results := make(chan RepoResult, len(repos)) // Buffered to avoid blocking
+	var wg sync.WaitGroup
+
+	// Create worker pool with limited concurrency
+	workers := maxWorkers
+	if len(repos) < workers {
+		workers = len(repos)
+	}
+
+	// Job queue
+	jobs := make(chan Repository, len(repos))
+	for _, repo := range repos {
+		jobs <- repo
+	}
+	close(jobs)
+
+	// Start workers
+	for range workers {
+		wg.Add(1)
+		go worker(cfg, jobs, results, &wg)
+	}
+
+	// Close results channel when all workers are done
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	return results
 }
 
-func collectCommits(cfg *Config, repos []Repository) []RepoCommits {
-	var results []RepoCommits
+func worker(cfg *Config, jobs <-chan Repository, results chan<- RepoResult, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-	for _, repo := range repos {
+	for repo := range jobs {
 		fmt.Fprintf(os.Stderr, "Fetching commits for %s...\n", repo.Name)
 
 		commits, err := fetchCommits(cfg, repo.Name)
 		if err != nil {
-			//fmt.Fprintf(os.Stderr, "  Skipping %s: %v\n", repo.Name, err)
+			results <- RepoResult{
+				RepoName: repo.Name,
+				Err:      fmt.Errorf("fetching commits: %w", err),
+			}
 			continue
 		}
 
 		filtered := filterCommits(commits)
-		if len(filtered) == 0 {
-			continue
-		}
-
-		results = append(results, RepoCommits{
+		results <- RepoResult{
 			RepoName: repo.Name,
 			Commits:  filtered,
-		})
-	}
+			Err:      nil,
+		}
 
-	return results
+		fmt.Fprintf(os.Stderr, "  Found %d commits for %s\n", len(filtered), repo.Name)
+	}
 }
+
+// --- Data Processing
 
 func filterCommits(commits []CommitResponse) []CommitInfo {
 	var filtered []CommitInfo
@@ -238,7 +308,7 @@ func shouldSkip(c CommitResponse) bool {
 
 func splitCommitMessage(full string) (subject, body string) {
 	parts := strings.SplitN(full, "\n", 2)
-	subject = strings.TrimSpace(parts[0])
+	subject = strings.TrimSpace(parts[0]) + "\n"
 
 	if len(parts) > 1 {
 		body = strings.TrimSpace(parts[1])
@@ -247,7 +317,7 @@ func splitCommitMessage(full string) (subject, body string) {
 	return subject, body
 }
 
-// ------------------------------------ Output Writing ---------------------------------------- //
+// --- Output Writing
 
 func getOutputFilename(username, since, until string) string {
 	return fmt.Sprintf("%s_%s_%s_to_%s.txt", outputPrefix, username, since, until)
@@ -261,16 +331,6 @@ func writeHeader(w io.Writer, username, since, until string) {
 	fmt.Fprint(w, header)
 }
 
-func writeCommits(w io.Writer, username string, commitsByRepo []RepoCommits) {
-	for _, rc := range commitsByRepo {
-		writeRepoHeader(w, username, rc.RepoName)
-
-		for _, commit := range rc.Commits {
-			writeCommitEntry(w, commit)
-		}
-	}
-}
-
 func writeRepoHeader(w io.Writer, username, repoName string) {
 	header := fmt.Sprintf(
 		"\nRepository: %s/%s\n%s\n",
@@ -280,48 +340,29 @@ func writeRepoHeader(w io.Writer, username, repoName string) {
 }
 
 func writeCommitEntry(w io.Writer, commit CommitInfo) {
-	entry := fmt.Sprintf(
-		"    Date: %s\n    %s\n",
-		commit.Date, commit.Subject,
-	)
-	fmt.Fprint(w, entry)
+	fmt.Fprintf(w, "  Date: %s\n", commit.Date)
+	fmt.Fprintf(w, "    %s\n", commit.Subject)
 
 	if commit.Body != "" {
-		fmt.Fprintf(w, "\n%s\n", indentLines(commit.Body, "    "))
+		lines := strings.Split(commit.Body, "\n")
+		for _, line := range lines {
+			if line == "" {
+				fmt.Fprintln(w)
+			} else {
+				fmt.Fprintf(w, "    %s\n", line)
+			}
+		}
 	}
 	fmt.Fprintln(w)
 }
 
-func indentLines(text, indent string) string {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		lines[i] = indent + line
-	}
-	return strings.Join(lines, "\n")
-}
-
-func writeSummary(w io.Writer, commitsByRepo []RepoCommits) {
-	totalCommits := 0
-	for _, rc := range commitsByRepo {
-		totalCommits += len(rc.Commits)
-	}
-
+func writeSummary(w io.Writer, totalCommits, repoCount int) {
 	summary := fmt.Sprintf(
 		"\n%s\nSummary:\n%s\nTotal commits: %d\nRepositories with commits: %d\n",
 		strings.Repeat("=", 60),
 		strings.Repeat("-", 60),
 		totalCommits,
-		len(commitsByRepo),
+		repoCount,
 	)
 	fmt.Fprint(w, summary)
-}
-
-func printSummary(commitsByRepo []RepoCommits) {
-	totalCommits := 0
-	for _, rc := range commitsByRepo {
-		totalCommits += len(rc.Commits)
-	}
-
-	fmt.Fprintf(os.Stderr, "Total commits: %d\n", totalCommits)
-	fmt.Fprintf(os.Stderr, "Repositories with commits: %d\n", len(commitsByRepo))
 }
