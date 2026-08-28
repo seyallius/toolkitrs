@@ -4,7 +4,19 @@
 // It uses the GitHub API with token authentication, processes repositories
 // concurrently with a worker pool, and writes the results to a text file.
 //
-// Memory Usage With Buffered Channel (worker pool pattern):
+// Memory Usage With Direct File Writing (mutex-synchronized worker pool):
+//
+//	Worker1 ──┐
+//	Worker2 ──┼──> [Mutex] ──> File
+//	Worker3 ──┘
+//			  ▲
+//			  └── Each worker writes immediately, then discards data.
+//			      No channel buffer means no accumulation of results in memory.
+//
+// The SafeFileWriter uses a mutex to ensure only one worker writes to the
+// file at a time, preventing corruption while maintaining memory efficiency.
+//
+// Memory Usage With Buffered Channel (worker pool pattern) -- Deprecated:
 //
 //	Worker1 ──┐
 //	Worker2 ──┼──> [Channel Buffer] ──> Main Loop ──> File
@@ -93,6 +105,32 @@ type RepoResult struct {
 	Err      error        // Error encountered while processing (nil if successful)
 }
 
+// SafeFileWriter provides thread-safe file writing operations using a mutex
+// to synchronize concurrent writes from multiple goroutines.
+type SafeFileWriter struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+// ---------------------------------------- Constructor(s) -------------------------------------- //
+
+// NewSafeFileWriter creates a new SafeFileWriter instance with the given filename.
+// It creates the file and returns a writer that can be safely used concurrently.
+//
+// Parameters:
+//   - filename: The name of the file to create
+//
+// Returns:
+//   - *SafeFileWriter: The thread-safe file writer
+//   - error: Any file creation error
+func NewSafeFileWriter(filename string) (*SafeFileWriter, error) {
+	file, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+	return &SafeFileWriter{file: file}, nil
+}
+
 // ---------------------------------------- Main ---------------------------------------------- //
 
 // main is the entry point of the program. It parses command-line arguments,
@@ -111,7 +149,7 @@ func main() {
 }
 
 // run executes the main workflow: fetching repositories, processing them
-// concurrently, and writing the results to an output file.
+// concurrently with direct file writing, and producing the output file.
 //
 // Parameters:
 //   - cfg: The configuration containing username, date range, token, and HTTP client.
@@ -126,46 +164,21 @@ func run(cfg *Config) error {
 
 	fmt.Fprintf(os.Stderr, "Found %d repositories\n", len(repos))
 
-	outputFile := getOutputFilename(cfg.Username, cfg.Since, cfg.Until)
-	file, err := os.Create(outputFile)
+	outputFile := getOutputFilenameWithSafeFileWriter(cfg.Username, cfg.Since, cfg.Until)
+	writer, err := NewSafeFileWriter(outputFile)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)
 	}
-	defer file.Close()
+	defer writer.Close()
 
 	// Write header once
-	writeHeader(file, cfg.Username, cfg.Since, cfg.Until)
+	writer.writeHeader(cfg.Username, cfg.Since, cfg.Until)
 
-	// Process repositories concurrently
-	results := processRepositories(cfg, repos)
-
-	// Write results as they come in (synchronized via channel)
-	totalCommits := 0
-	repoCount := 0
-
-	for result := range results {
-		if result.Err != nil {
-			fmt.Fprintf(os.Stderr, "Error processing %s: %v\n", result.RepoName, result.Err)
-			continue
-		}
-
-		if len(result.Commits) == 0 {
-			continue
-		}
-
-		repoCount++
-		totalCommits += len(result.Commits)
-
-		// Write this repo's commits immediately
-		writeRepoHeader(file, cfg.Username, result.RepoName)
-		for _, commit := range result.Commits {
-			writeCommitEntry(file, commit)
-		}
-		file.Sync() // Force flush to disk
-	}
+	// Process repositories concurrently with direct file writing
+	totalCommits, repoCount := processRepositoriesWithDirectWrite(cfg, repos, writer)
 
 	// Write summary
-	writeSummary(file, totalCommits, repoCount)
+	writer.writeSummary(totalCommits, repoCount)
 
 	fmt.Fprintf(os.Stderr, "\nDone! Output written to: %s\n", outputFile)
 	fmt.Fprintf(os.Stderr, "Total commits: %d\n", totalCommits)
@@ -194,9 +207,11 @@ func run(cfg *Config) error {
 //   - error: Any validation or parsing error
 func parseConfig() (*Config, error) {
 	if len(os.Args) < 4 {
-		return nil, fmt.Errorf("usage: go run gh_contrib.go <username> <since> <until>\n" +
-			"  Format: YYYY-MM-DD\n" +
-			"  Example: go run gh_contrib.go seyallius 2026-01-01 2026-08-27")
+		return nil, fmt.Errorf(
+			"usage: go run gh_contrib.go <username> <since> <until>\n" +
+				"  Format: YYYY-MM-DD\n" +
+				"  Example: go run gh_contrib.go seyallius 2026-01-01 2026-08-27",
+		)
 	}
 
 	token := os.Getenv(envToken)
@@ -311,6 +326,8 @@ func doRequest(cfg *Config, url string, target interface{}) error {
 //
 // Returns:
 //   - <-chan RepoResult: A read-only channel that receives results as they complete
+//
+// Deprecated: Use processRepositoriesWithDirectWrite instead.
 func processRepositories(cfg *Config, repos []Repository) <-chan RepoResult {
 	// "Worker Pool Pattern"
 
@@ -376,6 +393,99 @@ func worker(cfg *Config, jobs <-chan Repository, results chan<- RepoResult, wg *
 		}
 
 		fmt.Fprintf(os.Stderr, "  Found %d commits for %s\n", len(filtered), repo.Name)
+	}
+}
+
+// --- Concurrent Processing with Direct Write
+
+// processRepositoriesWithDirectWrite orchestrates concurrent processing of repositories
+// where each worker writes directly to the file using a synchronized writer.
+// This approach avoids storing all results in memory via a channel buffer.
+//
+// Parameters:
+//   - cfg: The configuration containing the authenticated user and token
+//   - repos: The list of repositories to process
+//   - writer: The thread-safe file writer
+//
+// Returns:
+//   - totalCommits: Total number of commits processed
+//   - repoCount: Number of repositories that had commits
+func processRepositoriesWithDirectWrite(cfg *Config, repos []Repository, writer *SafeFileWriter) (int, int) {
+	var wg sync.WaitGroup
+	var mu sync.Mutex // For synchronizing counters
+	totalCommits := 0
+	repoCount := 0
+
+	// Create worker pool with limited concurrency
+	workers := maxWorkers
+	if len(repos) < workers {
+		workers = len(repos)
+	}
+
+	// Job queue
+	jobs := make(chan Repository, len(repos))
+	for _, repo := range repos {
+		jobs <- repo
+	}
+	close(jobs)
+
+	// Start workers
+	for range workers {
+		wg.Add(1)
+		go workerWithDirectWrite(cfg, jobs, writer, &wg, &mu, &totalCommits, &repoCount)
+	}
+
+	wg.Wait()
+	return totalCommits, repoCount
+}
+
+// workerWithDirectWrite is the function executed by each worker goroutine.
+// It processes repositories from the job queue and writes results directly
+// to the file using the thread-safe writer.
+//
+// Parameters:
+//   - cfg: The configuration containing the authenticated user and token
+//   - jobs: A read-only channel of repositories to process
+//   - writer: The thread-safe file writer
+//   - wg: WaitGroup counter to signal when this worker is done
+//   - mu: Mutex for synchronizing counter updates
+//   - totalCommits: Pointer to the total commits counter
+//   - repoCount: Pointer to the repository count counter
+func workerWithDirectWrite(
+	cfg *Config,
+	jobs <-chan Repository,
+	writer *SafeFileWriter,
+	wg *sync.WaitGroup,
+	mu *sync.Mutex,
+	totalCommits *int,
+	repoCount *int,
+) {
+	defer wg.Done()
+
+	for repo := range jobs {
+		fmt.Fprintf(os.Stderr, "Fetching commits for %s...\n", repo.Name)
+
+		commits, err := fetchCommits(cfg, repo.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", repo.Name, err)
+			continue
+		}
+
+		filtered := filterCommits(commits)
+		if len(filtered) == 0 {
+			continue
+		}
+
+		// Write directly to file (synchronized internally)
+		writer.writeRepo(cfg.Username, repo.Name, filtered)
+
+		// Update counters safely
+		mu.Lock()
+		*totalCommits += len(filtered)
+		*repoCount++
+		mu.Unlock()
+
+		fmt.Fprintf(os.Stderr, "  Written %d commits for %s\n", len(filtered), repo.Name)
 	}
 }
 
@@ -456,7 +566,22 @@ func splitCommitMessage(full string) (subject, body string) {
 //
 // Returns:
 //   - string: The generated filename (e.g., contributions_username_2026-01-01_to_2026-08-27.txt)
+//
+// Deprecated: Use getOutputFilenameWithSafeFileWriter instead.
 func getOutputFilename(username, since, until string) string {
+	return fmt.Sprintf("%s_%s_%s_to_%s.txt", outputPrefix, username, since, until)
+}
+
+// getOutputFilenameWithSafeFileWriter generates the output filename based on the username and date range.
+//
+// Parameters:
+//   - username: The GitHub username
+//   - since: The start date
+//   - until: The end date
+//
+// Returns:
+//   - string: The generated filename (e.g., contributions_username_2026-01-01_to_2026-08-27.txt)
+func getOutputFilenameWithSafeFileWriter(username, since, until string) string {
 	return fmt.Sprintf("%s_%s_%s_to_%s.txt", outputPrefix, username, since, until)
 }
 
@@ -468,6 +593,8 @@ func getOutputFilename(username, since, until string) string {
 //   - username: The GitHub username
 //   - since: The start date
 //   - until: The end date
+//
+// Deprecated: Use SafeFileWriter.writeHeader instead.
 func writeHeader(w io.Writer, username, since, until string) {
 	header := fmt.Sprintf(
 		"GitHub Contributions for %s\nPeriod: %s to %s\n%s\n\n",
@@ -483,6 +610,8 @@ func writeHeader(w io.Writer, username, since, until string) {
 //   - w: The writer to write to
 //   - username: The GitHub username
 //   - repoName: The repository name
+//
+// Deprecated: Use SafeFileWriter.writeRepo instead.
 func writeRepoHeader(w io.Writer, username, repoName string) {
 	header := fmt.Sprintf(
 		"\nRepository: %s/%s\n%s\n",
@@ -497,6 +626,8 @@ func writeRepoHeader(w io.Writer, username, repoName string) {
 // Parameters:
 //   - w: The writer to write to
 //   - commit: The commit information to write
+//
+// Deprecated: Use SafeFileWriter.writeCommitLocked instead.
 func writeCommitEntry(w io.Writer, commit CommitInfo) {
 	fmt.Fprintf(w, "  Date: %s\n", commit.Date)
 	fmt.Fprintf(w, "    %s\n", commit.Subject)
@@ -521,6 +652,8 @@ func writeCommitEntry(w io.Writer, commit CommitInfo) {
 //   - w: The writer to write to
 //   - totalCommits: Total number of commits processed
 //   - repoCount: Number of repositories that had commits
+//
+// Deprecated: Use SafeFileWriter.writeSummary instead.
 func writeSummary(w io.Writer, totalCommits, repoCount int) {
 	summary := fmt.Sprintf(
 		"\n%s\nSummary:\n%s\nTotal commits: %d\nRepositories with commits: %d\n",
@@ -530,4 +663,105 @@ func writeSummary(w io.Writer, totalCommits, repoCount int) {
 		repoCount,
 	)
 	fmt.Fprint(w, summary)
+}
+
+// --- SafeFileWriter
+
+// writeHeader writes the header section of the output file in a thread-safe manner.
+//
+// Parameters:
+//   - username: The GitHub username
+//   - since: The start date
+//   - until: The end date
+func (w *SafeFileWriter) writeHeader(username, since, until string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	header := fmt.Sprintf(
+		"GitHub Contributions for %s\nPeriod: %s to %s\n%s\n\n",
+		username, since, until, strings.Repeat("=", 60),
+	)
+	w.file.WriteString(header)
+	w.file.Sync()
+}
+
+// writeRepo writes a repository's commits to the file in a thread-safe manner.
+// It writes the repository header followed by all commit entries.
+//
+// Parameters:
+//   - username: The GitHub username
+//   - repoName: The repository name
+//   - commits: The list of commit information to write
+func (w *SafeFileWriter) writeRepo(username, repoName string, commits []CommitInfo) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Write repo header
+	const repositoryStrLen = 13
+	header := fmt.Sprintf(
+		"Repository: %s/%s\n%s\n",
+		username, repoName, strings.Repeat("-", len(repoName)+len(username)+repositoryStrLen),
+	)
+	w.file.WriteString(header)
+
+	// Write all commits for this repo
+	for _, commit := range commits {
+		w.writeCommitLocked(commit)
+	}
+
+	w.file.Sync()
+}
+
+// writeCommitLocked writes a single commit entry to the file.
+// This method assumes the mutex is already held by the caller.
+//
+// Parameters:
+//   - commit: The commit information to write
+func (w *SafeFileWriter) writeCommitLocked(commit CommitInfo) {
+	fmt.Fprintf(w.file, "  Date: %s\n", commit.Date)
+	fmt.Fprintf(w.file, "    %s\n", commit.Subject)
+
+	if commit.Body != "" {
+		lines := strings.Split(commit.Body, "\n")
+		for _, line := range lines {
+			if line == "" {
+				fmt.Fprintln(w.file)
+			} else {
+				fmt.Fprintf(w.file, "    %s\n", line)
+			}
+		}
+	}
+	fmt.Fprintln(w.file)
+}
+
+// writeSummary writes the summary section at the end of the output file
+// in a thread-safe manner.
+//
+// Parameters:
+//   - totalCommits: Total number of commits processed
+//   - repoCount: Number of repositories that had commits
+func (w *SafeFileWriter) writeSummary(totalCommits, repoCount int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	summary := fmt.Sprintf(
+		"\n%s\nSummary:\n%s\nTotal commits: %d\nRepositories with commits: %d\n",
+		strings.Repeat("=", 60),
+		strings.Repeat("-", 60),
+		totalCommits,
+		repoCount,
+	)
+	w.file.WriteString(summary)
+	w.file.Sync()
+}
+
+// Close closes the underlying file in a thread-safe manner.
+//
+// Returns:
+//   - error: Any file close error
+func (w *SafeFileWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.file.Close()
 }
