@@ -16,6 +16,8 @@ and rich CLI help.
 - **Interactive TUI**: A beautiful, keyboard-driven terminal UI for browsing files and running workflows with live
   progress
 - **Unified CLI**: One binary for all media workflows (`ts2mp4`, `mkv2mp3`, `mp32mp4`, `vidwrap`)
+- **GitHub Contributions Exporter**: Fetch and format a user's GitHub commits within a date range into a clean text file
+  (`gh-contrib`)
 - **Batch Processing**: Automatic directory scanning with skip/overwrite logic
 - **Interactive Sibling Discovery**: If you provide one file and related files exist nearby, toolkitrs can ask whether
   to process them too
@@ -80,7 +82,7 @@ cargo install --path .
 
 ### Prerequisites
 
-- [FFmpeg](https://ffmpeg.org/download.html) must be installed and available in your PATH
+- [FFmpeg](https://ffmpeg.org/download.html) must be installed and available in your PATH (for media workflows)
 - Optional: Use `--ffmpeg-path <PATH>` to specify a custom FFmpeg location
 
 ## 🚀 Usage
@@ -104,6 +106,7 @@ toolkitrs ts2mp4 --help
 toolkitrs mkv2mp3 --help
 toolkitrs mp32mp4 --help
 toolkitrs vidwrap --help
+toolkitrs gh-contrib --help
 ```
 
 ## 🖥️ Interactive Terminal UI (TUI)
@@ -113,9 +116,10 @@ interactive Terminal UI.
 
 The TUI provides:
 
-- **Workflow Selection**: Choose between `ts2mp4`, `mkv2mp3`, `mp32mp4`, and `vidwrap`.
+- **Workflow Selection**: Choose between `ts2mp4`, `mkv2mp3`, `mp32mp4`, `vidwrap`, and `gh-contrib`.
 - **Visual File Browser**: Navigate your directories and select files using vim-style bindings (`h/j/k/l`).
 - **Live Execution**: Watch real-time `ffmpeg` logs and per-file progress gauges as your batch processes.
+- **Smart Inputs**: Context-aware inputs (e.g. type `today` or `yesterday` for GitHub date ranges).
 
 > **Note:** The TUI requires an interactive terminal. If run in a CI/CD pipeline or piped to a file, it will safely exit
 > and suggest using the CLI subcommands instead.
@@ -283,6 +287,28 @@ Notes:
 - Single-file mode preserves the interactive post-processing prompt.
 - Batch mode keeps original and source image files by default to avoid destructive prompts.
 - Previously generated `*_with_image.mp4` files are excluded from batch discovery.
+
+### `gh-contrib` — Export GitHub Contributions
+
+Fetches GitHub commits for a specified user within a date range, filters out merge and revert commits, and exports them
+to a beautifully formatted text file. Optionally includes repository READMEs.
+
+> **Note:** Requires a `GITHUB_TOKEN` environment variable with `repo` and `read:user` scopes. You can generate one
+> at [github.com/settings/tokens](https://github.com/settings/tokens).
+
+```bash
+# Export commits for a specific date range
+toolkitrs gh-contrib --username seyallius --since 2026-01-01 --until 2026-08-27
+
+# Skip fetching repository READMEs to speed up the process
+toolkitrs gh-contrib -u seyallius -s 2026-01-01 -t 2026-08-27 --no-readme
+
+# Specify a custom output file path
+toolkitrs gh-contrib -u seyallius -s 2026-01-01 -t 2026-08-27 -o ./my_contribs.txt
+```
+
+**TUI Bonus:** When using `gh-contrib` inside the Interactive TUI, the date inputs support natural language! You can
+simply type `today` or `yesterday` instead of manually typing out the `YYYY-MM-DD` format.
 
 ## 🔧 Development
 
