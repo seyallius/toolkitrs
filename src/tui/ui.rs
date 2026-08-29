@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, List, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListState, Paragraph},
     Frame,
 };
 
@@ -47,9 +47,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let crumb = match app.screen {
         Screen::Home => "workflows".to_string(),
-        Screen::FilePicker => format!("{} · {}", app.workflow_title(), app.cwd.display()),
-        Screen::Options => format!("options · {}", app.workflow_title()),
-        Screen::Running => format!("running · {}", app.workflow_title()),
+        Screen::FilePicker => format!("{} · {}", app.command_title(), app.cwd.display()),
+        Screen::Options => format!("options · {}", app.command_title()),
+        Screen::Running => format!("running · {}", app.command_title()),
     };
     let title = Line::from(vec![
         Span::styled(
@@ -70,10 +70,10 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 /// Renders the workflow selection list.
 fn render_home(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<Line> = app
-        .workflows
+        .commands
         .iter()
         .enumerate()
-        .map(|(i, w)| {
+        .map(|(i, c)| {
             let selected = i == app.home_index;
             let marker = if selected { "▶" } else { " " };
             let style = if selected {
@@ -83,8 +83,8 @@ fn render_home(f: &mut Frame, app: &App, area: Rect) {
             };
             Line::from(vec![
                 Span::styled(format!(" {marker} "), style),
-                Span::styled(format!("{:<10}", w.title()), style),
-                Span::styled(w.description(), Style::default().fg(DIM)),
+                Span::styled(format!("{:<12}", c.title()), style),
+                Span::styled(c.description(), Style::default().fg(DIM)),
             ])
         })
         .collect();
@@ -181,13 +181,37 @@ fn render_options(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(DIM))
-            .title(format!(" Options · {} ", app.workflow_title())),
+            .title(format!(" Options · {} ", app.command_title())),
     );
 
     // Use ListState to enable scrolling
     let mut state = ListState::default();
     state.select(Some(app.options_index));
     f.render_stateful_widget(list, area, &mut state);
+
+    // Render inline text editor popup if active
+    if let Some((label, buffer)) = &app.editing_text {
+        let text = format!(
+            "Editing: {}\n\n> {}█\n\n[Enter] save   [Esc] cancel",
+            label, buffer
+        );
+        let popup = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(" Text Input "),
+            )
+            .style(Style::default().fg(Color::White));
+
+        // Reuses the centered_rect helper that already exists in this file!
+        let popup_area = centered_rect(60, 30, area);
+
+        // Clear the background behind the popup so text doesn't bleed through
+        f.render_widget(Clear, popup_area);
+        f.render_widget(popup, popup_area);
+    }
 }
 
 /// Renders the running screen: per-file statuses + live log + progress gauge.

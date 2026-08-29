@@ -2,11 +2,15 @@
 //! This is the "controller" of the TUI: it owns state and mutates it in
 //! response to events, but never renders anything itself.
 
+use crate::tui::command::CommandOption;
 use crate::{
-    tui::{event::AppEvent, runner},
+    github,
+    tui::{command, event::AppEvent},
     workflow::Workflow,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::{
     collections::HashSet,
     fs,
@@ -14,7 +18,6 @@ use std::{
     sync::mpsc::Sender,
 };
 use tokio_util::sync::CancellationToken;
-
 // --------------------------------- Types, Constants & Variables ------------------------------- //
 
 /// Spinner animation frames (braille dots).
@@ -118,6 +121,9 @@ pub struct RunOptions {
     pub bitrate: u32,
     /// Cover art square size in pixels (cover workflows only).
     pub cover_size: u32,
+    pub parallel: bool,
+    /// For text inputs.
+    pub custom: HashMap<String, String>,
 }
 impl Default for RunOptions {
     /// Sensible defaults matching the CLI's defaults.
@@ -127,6 +133,8 @@ impl Default for RunOptions {
             force: false,
             bitrate: 320,
             cover_size: 600,
+            parallel: true,
+            custom: HashMap::new(),
         }
     }
 }
@@ -136,12 +144,12 @@ impl Default for RunOptions {
 pub struct App {
     /// Active screen.
     pub screen: Screen,
-    /// All workflows, in display order.
-    pub workflows: Vec<Workflow>,
+    /// All available commands, in display order.
+    pub commands: Vec<Arc<dyn command::TuiCommand>>,
     /// Cursor index on the home screen.
     pub home_index: usize,
-    /// The workflow chosen on the home screen.
-    pub selected_workflow: Option<Workflow>,
+    /// The command chosen on the home screen.
+    pub selected_command: Option<usize>,
     /// Directory currently browsed by the picker.
     pub cwd: PathBuf,
     /// Entries in `cwd` (dirs first, then matching files).
@@ -180,15 +188,25 @@ pub struct App {
     pub residual_files: Vec<PathBuf>,
     /// Pending cleanup decision after cancellation.
     pub show_cleanup_prompt: bool,
+    /// Inline text editor state.
+    pub editing_text: Option<(String, String)>,
 }
 impl App {
     /// Creates a fresh app state starting on the home screen.
     pub fn new(ffmpeg_path: Option<PathBuf>) -> Self {
+        let commands: Vec<Arc<dyn command::TuiCommand>> = vec![
+            Arc::new(Workflow::Ts2Mp4),
+            Arc::new(Workflow::Mkv2Mp3),
+            Arc::new(Workflow::Mp32Mp4),
+            Arc::new(Workflow::Vidwrap),
+            Arc::new(github::tui::GhContribCommand),
+        ];
+
         Self {
             screen: Screen::Home,
-            workflows: Workflow::all(),
+            commands,
             home_index: 0,
-            selected_workflow: None,
+            selected_command: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             entries: Vec::new(),
             picker_index: 0,
@@ -208,6 +226,7 @@ impl App {
             cancel_token: None,
             residual_files: Vec::new(),
             show_cleanup_prompt: false,
+            editing_text: None,
         }
     }
 
@@ -264,47 +283,72 @@ impl App {
     }
 
     /// Returns the selected workflow title for headings.
-    pub fn workflow_title(&self) -> &'static str {
-        self.selected_workflow
-            .map(|workflow| workflow.title())
+    pub fn command_title(&self) -> &'static str {
+        self.selected_command
+            .map(|i| self.commands[i].title())
             .unwrap_or("")
-    }
-
-    /// Returns true when the selected workflow uses bitrate settings.
-    pub fn workflow_uses_bitrate(&self) -> bool {
-        self.selected_workflow
-            .is_some_and(|workflow| workflow.uses_bitrate())
-    }
-
-    /// Returns true when the selected workflow uses cover-size settings.
-    pub fn workflow_uses_cover_size(&self) -> bool {
-        self.selected_workflow
-            .is_some_and(|workflow| workflow.uses_cover_size())
     }
 
     /// Returns the option rows formatted for the UI.
     pub fn option_rows(&self) -> Vec<String> {
-        vec![
-            format!(
-                "Force overwrite      : {}",
-                if self.options.force { "ON" } else { "OFF" }
-            ),
-            self.bitrate_row_text(),
-            self.cover_size_row_text(),
-            format!(
-                "Output directory     : {}",
+        let mut rows = Vec::new();
+        let Some(cmd_idx) = self.selected_command else {
+            return vec!["Start".to_string()];
+        };
+        let cmd = &self.commands[cmd_idx];
+
+        for opt in cmd.options() {
+            match opt {
+                CommandOption::Toggle { label, .. } => {
+                    let val = match label {
+                        "Force overwrite" => self.options.force,
+                        _ => self
+                            .options
+                            .custom
+                            .get(label)
+                            .map(|v| v == "true")
+                            .unwrap_or(false),
+                    };
+                    rows.push(format!("{:<20}: {}", label, if val { "ON" } else { "OFF" }));
+                }
+                CommandOption::Numeric { label, unit, .. } => {
+                    let val = match label {
+                        "Audio bitrate" => self.options.bitrate.to_string(),
+                        "Cover size" => self.options.cover_size.to_string(),
+                        _ => "N/A".to_string(),
+                    };
+                    rows.push(format!("{:<20}: {} {}", label, val, unit));
+                }
+                CommandOption::Text { label, default } => {
+                    let val = self
+                        .options
+                        .custom
+                        .get(label)
+                        .map(|s| s.as_str())
+                        .unwrap_or(default);
+                    let display = if val.is_empty() { "<empty>" } else { val };
+                    rows.push(format!("{:<20}: {}", label, display));
+                }
+            }
+        }
+        if cmd.file_picker_mode() != command::FilePickerMode::NotNeeded {
+            rows.push(format!(
+                "{:<20}: {}",
+                "Output directory",
                 self.options.output_dir.display()
-            ),
-            format!(
-                "Parallelism          : {}",
-                if self.parallel {
+            ));
+            rows.push(format!(
+                "{:<20}: {}",
+                "Parallelism",
+                if self.options.parallel {
                     "Parallel"
                 } else {
                     "Sequential"
                 }
-            ),
-            "Start".to_string(),
-        ]
+            ));
+        }
+        rows.push("Start".to_string());
+        rows
     }
 
     /// Routes a key event to the active screen's handler.
@@ -315,6 +359,29 @@ impl App {
         }
 
         if self.try_cancel_running_batch(key) {
+            return;
+        }
+
+        // Inline text editor intercepts keys
+        if let Some((label, buffer)) = &mut self.editing_text {
+            match key.code {
+                KeyCode::Enter => {
+                    let l = label.clone();
+                    let b = buffer.clone();
+                    self.options.custom.insert(l, b);
+                    self.editing_text = None;
+                }
+                KeyCode::Esc => {
+                    self.editing_text = None;
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -329,8 +396,11 @@ impl App {
 impl App {
     /// Returns the picker's file-extension filter for the chosen workflow.
     fn input_ext(&self) -> &'static str {
-        self.selected_workflow
-            .map(|workflow| workflow.input_extension())
+        self.selected_command
+            .and_then(|i| match self.commands[i].file_picker_mode() {
+                command::FilePickerMode::Required { extension, .. } => Some(extension),
+                _ => None,
+            })
             .unwrap_or("")
     }
 
@@ -341,11 +411,11 @@ impl App {
                 self.home_index = self.home_index.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.home_index + 1 < self.workflows.len() {
+                if self.home_index + 1 < self.commands.len() {
                     self.home_index += 1;
                 }
             }
-            KeyCode::Enter => self.select_current_workflow(),
+            KeyCode::Enter => self.select_current_command(),
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             _ => {}
         }
@@ -364,7 +434,7 @@ impl App {
             }
             KeyCode::Char(' ') => self.toggle_current(),
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.select_all_files();
+                self.select_all_files()
             }
             KeyCode::Backspace | KeyCode::Char('h') => self.go_parent(),
             KeyCode::Enter | KeyCode::Char('l') => self.enter_current_or_confirm(),
@@ -381,12 +451,23 @@ impl App {
                 self.options_index = self.options_index.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.options_index = (self.options_index + 1).min(OptionsRow::count() - 1);
+                self.options_index =
+                    (self.options_index + 1).min(self.option_rows().len().saturating_sub(1));
             }
             KeyCode::Left => self.adjust_current(-1),
             KeyCode::Right => self.adjust_current(1),
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_current(tx),
-            KeyCode::Char('b') | KeyCode::Esc => self.screen = Screen::FilePicker,
+            KeyCode::Char('b') | KeyCode::Esc => {
+                if self
+                    .selected_command
+                    .map(|i| self.commands[i].file_picker_mode())
+                    == Some(command::FilePickerMode::NotNeeded)
+                {
+                    self.screen = Screen::Home;
+                } else {
+                    self.screen = Screen::FilePicker;
+                }
+            }
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
@@ -402,11 +483,9 @@ impl App {
             }
             return;
         }
-
         if self.running {
             return;
         }
-
         match key.code {
             KeyCode::Enter | KeyCode::Esc => self.reset_to_home(),
             KeyCode::Char('q') => self.should_quit = true,
@@ -417,29 +496,23 @@ impl App {
     /// Loads and sorts the picker entries for `path`.
     fn load_directory(&mut self, path: &Path) {
         let mut entries = Vec::new();
-
         if let Ok(read_dir) = fs::read_dir(path) {
             for entry in read_dir.flatten() {
-                let path = entry.path();
-                if self.should_show_entry(&path) {
+                let p = entry.path();
+                if self.should_show_entry(&p) {
                     entries.push(DirEntry {
                         name: entry.file_name().to_string_lossy().into_owned(),
-                        path,
-                        is_dir: entry
-                            .file_type()
-                            .map(|file_type| file_type.is_dir())
-                            .unwrap_or(false),
+                        path: p,
+                        is_dir: entry.file_type().map(|t| t.is_dir()).unwrap_or(false),
                     });
                 }
             }
         }
-
-        entries.sort_by(|left, right| match (left.is_dir, right.is_dir) {
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
-            _ => left.name.cmp(&right.name),
+            _ => a.name.cmp(&b.name),
         });
-
         self.cwd = path.to_path_buf();
         self.entries = entries;
         self.picker_index = 0;
@@ -457,11 +530,9 @@ impl App {
         let Some(entry) = self.entries.get(self.picker_index) else {
             return;
         };
-
         if entry.is_dir {
             return;
         }
-
         let path = entry.path.clone();
         if !self.selected_files.remove(&path) {
             self.selected_files.insert(path);
@@ -480,7 +551,12 @@ impl App {
     /// Confirms the picker selection and moves to the options screen.
     fn confirm_selection(&mut self) {
         self.select_current_file_if_needed();
-        if !self.selected_files.is_empty() {
+        if !self.selected_files.is_empty()
+            || self
+                .selected_command
+                .map(|i| self.commands[i].file_picker_mode())
+                == Some(command::FilePickerMode::NotNeeded)
+        {
             self.options_index = 0;
             self.screen = Screen::Options;
         }
@@ -488,39 +564,58 @@ impl App {
 
     /// Adjusts the numeric option under the cursor by `delta`'s sign.
     fn adjust_current(&mut self, delta: i32) {
-        match self.current_options_row() {
-            OptionsRow::AudioBitrate if self.workflow_uses_bitrate() => {
-                self.options.bitrate = adjust_u32(
-                    self.options.bitrate,
-                    delta,
-                    BITRATE_STEP,
-                    BITRATE_MIN,
-                    BITRATE_MAX,
-                );
-            }
-            OptionsRow::CoverSize if self.workflow_uses_cover_size() => {
-                self.options.cover_size = adjust_u32(
-                    self.options.cover_size,
-                    delta,
-                    COVER_SIZE_STEP,
-                    COVER_SIZE_MIN,
-                    COVER_SIZE_MAX,
-                );
-            }
-            OptionsRow::ExecutionMode => {
-                self.parallel = !self.parallel;
-            }
-            _ => {}
+        let rows = self.option_rows();
+        let Some(row_text) = rows.get(self.options_index) else {
+            return;
+        };
+        if row_text.starts_with("Audio bitrate") {
+            self.options.bitrate = adjust_u32(
+                self.options.bitrate,
+                delta,
+                BITRATE_STEP,
+                BITRATE_MIN,
+                BITRATE_MAX,
+            );
+        } else if row_text.starts_with("Cover size") {
+            self.options.cover_size = adjust_u32(
+                self.options.cover_size,
+                delta,
+                COVER_SIZE_STEP,
+                COVER_SIZE_MIN,
+                COVER_SIZE_MAX,
+            );
+        } else if row_text.starts_with("Parallelism") {
+            self.options.parallel = !self.options.parallel;
         }
     }
 
     /// Activates the options row under the cursor.
     fn activate_current(&mut self, tx: &Sender<AppEvent>) {
-        match self.current_options_row() {
-            OptionsRow::ForceOverwrite => self.options.force = !self.options.force,
-            OptionsRow::ExecutionMode => self.parallel = !self.parallel,
-            OptionsRow::Start => self.start_run(tx),
-            OptionsRow::AudioBitrate | OptionsRow::CoverSize | OptionsRow::OutputDirectory => {}
+        let rows = self.option_rows();
+        let Some(row_text) = rows.get(self.options_index) else {
+            return;
+        };
+
+        if row_text.starts_with("Force overwrite") || row_text.starts_with("Skip README") {
+            let label = row_text.split(':').next().unwrap().trim();
+            let is_on = row_text.contains("ON");
+            self.options
+                .custom
+                .insert(label.to_string(), (!is_on).to_string());
+            if label == "Force overwrite" {
+                self.options.force = !is_on;
+            }
+        } else if row_text == "Start" {
+            self.start_run(tx);
+        } else if row_text.starts_with("Output directory") {
+            // Simple toggle for now, could be a text editor later
+        } else if row_text.starts_with("Parallelism") {
+            self.options.parallel = !self.options.parallel;
+        } else {
+            // It's a Text option! Open inline editor
+            let label = row_text.split(':').next().unwrap().trim();
+            let current = self.options.custom.get(label).cloned().unwrap_or_default();
+            self.editing_text = Some((label.to_string(), current));
         }
     }
 
@@ -531,12 +626,12 @@ impl App {
                 let _ = fs::remove_file(path);
             }
             self.push_log(format!(
-                "✔ Removed {} residual files.",
+                "🗑️ Removed {} residual files.",
                 self.residual_files.len()
             ));
         } else {
             self.push_log(format!(
-                "⊗ Kept {} residual files.",
+                "📁 Kept {} residual files.",
                 self.residual_files.len()
             ));
         }
@@ -547,21 +642,22 @@ impl App {
 
     /// Builds the file queue and spawns the background Worker.
     fn start_run(&mut self, tx: &Sender<AppEvent>) {
-        let Some(workflow) = self.selected_workflow else {
+        let Some(cmd_idx) = self.selected_command else {
             return;
         };
 
+        // Clone the Arc pointer to move into the thread safely
+        let command = self.commands[cmd_idx].clone();
         let files = self.selected_files_sorted();
         let cancel = CancellationToken::new();
         self.prepare_run(&files, cancel.clone());
 
-        runner::spawn_Worker(
+        crate::tui::runner::spawn_worker(
             tx.clone(),
             self.ffmpeg_path.clone(),
-            workflow,
+            command,
             files,
             self.options.clone(),
-            self.parallel,
             cancel,
         );
     }
@@ -576,26 +672,28 @@ impl App {
         if self.screen != Screen::Running || !self.running || key.code != KeyCode::Char('c') {
             return false;
         }
-
         if let Some(token) = &self.cancel_token {
             token.cancel();
-            self.push_log("⊙ Cancellation requested...".into());
+            self.push_log("⚠️ Cancellation requested...".into());
         }
-
         true
     }
 
     /// Selects the workflow under the home-screen cursor.
-    fn select_current_workflow(&mut self) {
-        let workflow = self.workflows[self.home_index];
+    fn select_current_command(&mut self) {
+        let cmd_idx = self.home_index;
         let current_dir = self.cwd.clone();
-
-        self.selected_workflow = Some(workflow);
+        self.selected_command = Some(cmd_idx);
         self.selected_files.clear();
         self.log.clear();
         self.finished = false;
-        self.load_directory(&current_dir);
-        self.screen = Screen::FilePicker;
+
+        if self.commands[cmd_idx].file_picker_mode() == command::FilePickerMode::NotNeeded {
+            self.screen = Screen::Options;
+        } else {
+            self.load_directory(&current_dir);
+            self.screen = Screen::FilePicker;
+        }
     }
 
     /// Enters the current directory entry or confirms file selection.
@@ -603,7 +701,6 @@ impl App {
         let Some(entry) = self.entries.get(self.picker_index).cloned() else {
             return;
         };
-
         if entry.is_dir {
             self.load_directory(&entry.path);
         } else {
@@ -616,10 +713,13 @@ impl App {
         if path.is_dir() {
             return true;
         }
-
+        let ext = self.input_ext();
+        if ext.is_empty() {
+            return false;
+        }
         path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case(self.input_ext()))
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case(ext))
             .unwrap_or(false)
     }
 
@@ -628,11 +728,9 @@ impl App {
         if !self.selected_files.is_empty() {
             return;
         }
-
         let Some(entry) = self.entries.get(self.picker_index) else {
             return;
         };
-
         if !entry.is_dir {
             self.selected_files.insert(entry.path.clone());
         }
@@ -641,24 +739,6 @@ impl App {
     /// Returns the currently selected options row.
     fn current_options_row(&self) -> OptionsRow {
         OptionsRow::from_index(self.options_index)
-    }
-
-    /// Formats the bitrate row based on the selected workflow.
-    fn bitrate_row_text(&self) -> String {
-        if self.workflow_uses_bitrate() {
-            format!("Audio bitrate        : {} kbps", self.options.bitrate)
-        } else {
-            "Audio bitrate        : N/A for this workflow".to_string()
-        }
-    }
-
-    /// Formats the cover-size row based on the selected workflow.
-    fn cover_size_row_text(&self) -> String {
-        if self.workflow_uses_cover_size() {
-            format!("Cover size           : {} px", self.options.cover_size)
-        } else {
-            "Cover size           : N/A for this workflow".to_string()
-        }
     }
 
     /// Returns selected files sorted for deterministic processing.

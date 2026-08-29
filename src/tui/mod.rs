@@ -11,8 +11,9 @@
 //!
 //! This mirrors a classic loop: read events → update state → draw.
 
-mod app;
-mod event;
+pub mod app;
+pub mod command;
+pub mod event;
 mod runner;
 mod ui;
 

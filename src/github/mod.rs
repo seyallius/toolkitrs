@@ -17,5 +17,6 @@ pub mod api;
 pub mod config;
 pub mod filter;
 pub mod processor;
+pub mod tui;
 pub mod types;
 pub mod writer;

@@ -8,9 +8,13 @@
 //!
 //! Keeping that logic here avoids duplicating the same workflow mapping across
 //! CLI commands and the TUI runner.
+//!
+//! Now also implements [tui::command::TuiCommand] so media workflows can run in the
+//! generic TUI shell.
 
 use crate::{
     ffmpeg::{args, runner::run_async as run_ffmpeg_async},
+    tui::{app, command},
     util::{cancel::Cancelled, files, output},
 };
 use anyhow::Result;
@@ -153,6 +157,172 @@ impl Workflow {
         }
     }
 }
+impl command::TuiCommand for Workflow {
+    fn id(&self) -> &'static str {
+        self.title()
+    }
+
+    fn title(&self) -> &'static str {
+        // existing title() method
+        match self {
+            Self::Ts2Mp4 => "ts2mp4",
+            Self::Mkv2Mp3 => "mkv2mp3",
+            Self::Mp32Mp4 => "mp32mp4",
+            Self::Vidwrap => "vidwrap",
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        // existing description() method
+        match self {
+            Self::Ts2Mp4 => "Remux TS to MP4 (no re-encode)",
+            Self::Mkv2Mp3 => "Extract audio from MKV to MP3",
+            Self::Mp32Mp4 => "Turn MP3 into MP4 with cover art",
+            Self::Vidwrap => "Wrap video with a companion image",
+        }
+    }
+
+    fn file_picker_mode(&self) -> command::FilePickerMode {
+        command::FilePickerMode::Required {
+            extension: self.input_extension(),
+            exclude_stem_suffix: match self {
+                Self::Vidwrap => Some("_with_image"),
+                _ => None,
+            },
+        }
+    }
+
+    fn options(&self) -> Vec<command::CommandOption> {
+        let mut opts = vec![command::CommandOption::Toggle {
+            label: "Force overwrite",
+            default: false,
+        }];
+
+        if self.uses_bitrate() {
+            opts.push(command::CommandOption::Numeric {
+                label: "Audio bitrate",
+                default: 320,
+                step: 64,
+                min: 64,
+                max: 640,
+                unit: "kbps",
+            });
+        }
+
+        if self.uses_cover_size() {
+            opts.push(command::CommandOption::Numeric {
+                label: "Cover size",
+                default: 600,
+                step: 100,
+                min: 100,
+                max: 2000,
+                unit: "px",
+            });
+        }
+
+        opts.push(command::CommandOption::Text {
+            label: "Output directory",
+            default: "out",
+        });
+
+        opts
+    }
+
+    fn execute(
+        &self,
+        files: Vec<PathBuf>,
+        options: &app::RunOptions,
+        cancel: CancellationToken,
+        ffmpeg_path: &Path,
+        tx: std::sync::mpsc::Sender<crate::tui::event::AppEvent>,
+    ) -> Result<()> {
+        let workflow_options = workflow_options(options);
+        if self.uses_output_dir() {
+            if let Err(error) = std::fs::create_dir_all(&workflow_options.output_dir) {
+                let _ = tx.send(crate::tui::event::AppEvent::Log(format!("❌ {error}")));
+            }
+        }
+
+        let concurrency = if options.parallel {
+            crate::util::parallel::num_cpus()
+        } else {
+            1
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        runtime.block_on(async {
+            let (event_tx, mut event_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::util::parallel::BatchEvent>();
+            let workflow = *self;
+            let options_clone = workflow_options.clone();
+            let ffmpeg_path_clone = ffmpeg_path.to_path_buf();
+
+            let worker = move |input: PathBuf, cancel: CancellationToken| {
+                let workflow = workflow;
+                let options = options_clone.clone();
+                let ffmpeg_path = ffmpeg_path_clone.clone();
+                Box::pin(async move {
+                    let output = workflow.output_path(&input, &options)?;
+                    if output.exists() && !options.force {
+                        return Ok(output);
+                    }
+                    workflow
+                        .run_async(input, output, &options, &ffmpeg_path, cancel, None)
+                        .await
+                })
+            };
+
+            let runner_task = tokio::spawn(crate::util::parallel::run_parallel(
+                files.clone(),
+                concurrency,
+                cancel.clone(),
+                crate::util::parallel::FailurePolicy::Continue,
+                event_tx,
+                worker,
+            ));
+
+            let mut summary = crate::util::parallel::BatchSummary::default();
+            let mut progress = std::collections::HashSet::new();
+            let mut succeeded = std::collections::HashSet::new();
+
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    crate::util::parallel::BatchEvent::Started(index) => {
+                        progress.insert(index);
+                        let _ = tx.send(crate::tui::event::AppEvent::FileStarted(index));
+                    }
+                    crate::util::parallel::BatchEvent::Done(index, result) => match result {
+                        crate::util::parallel::WorkResult::Success(_) => {
+                            succeeded.insert(index);
+                            let _ = tx.send(crate::tui::event::AppEvent::FileDone(index, true));
+                        }
+                        crate::util::parallel::WorkResult::Failed(error) => {
+                            let _ =
+                                tx.send(crate::tui::event::AppEvent::Log(format!("❌ {error}")));
+                            let _ = tx.send(crate::tui::event::AppEvent::FileDone(index, false));
+                        }
+                        crate::util::parallel::WorkResult::Cancelled => {
+                            let _ = tx.send(crate::tui::event::AppEvent::FileDone(index, false));
+                        }
+                    },
+                    crate::util::parallel::BatchEvent::AllDone(s) => {
+                        summary = s;
+                        break;
+                    }
+                }
+            }
+
+            let _ = tx.send(crate::tui::event::AppEvent::AllDone {
+                succeeded: summary.succeeded,
+                failed: summary.failed,
+            });
+            let _ = runner_task.await;
+        });
+        Ok(())
+    }
+}
 
 /// Shared execution settings for workflow runs.
 ///
@@ -184,6 +354,17 @@ impl Default for WorkflowOptions {
 }
 
 // -------------------------------------- Internal Helpers -------------------------------------- //
+
+/// Builds shared workflow options from the TUI's run settings.
+fn workflow_options(options: &app::RunOptions) -> WorkflowOptions {
+    WorkflowOptions {
+        output_dir: options.output_dir.clone(),
+        force: options.force,
+        bitrate: options.bitrate,
+        cover_size: options.cover_size,
+        no_cover_fallback: false,
+    }
+}
 
 /// Extracts MP3 audio from an MKV file, optionally with cover art.
 async fn run_mkv2mp3(
