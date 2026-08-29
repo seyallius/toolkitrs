@@ -223,6 +223,7 @@ impl command::TuiCommand for Workflow {
         opts.push(command::CommandOption::Text {
             label: "Output directory",
             default: "out",
+            placeholder: "e.g., /path/to/output",
         });
 
         opts

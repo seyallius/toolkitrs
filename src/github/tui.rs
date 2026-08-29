@@ -42,14 +42,17 @@ impl TuiCommand for GhContribCommand {
             CommandOption::Text {
                 label: "GitHub username",
                 default: "",
+                placeholder: "e.g., octocat",
             },
             CommandOption::Text {
                 label: "Since (YYYY-MM-DD)",
-                default: "",
+                default: "yesterday",
+                placeholder: "YYYY-MM-DD or 'yesterday'",
             },
             CommandOption::Text {
                 label: "Until (YYYY-MM-DD)",
-                default: "",
+                default: "today",
+                placeholder: "YYYY-MM-DD or 'today'",
             },
             CommandOption::Toggle {
                 label: "Skip README files",

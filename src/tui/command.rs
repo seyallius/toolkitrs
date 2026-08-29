@@ -43,6 +43,7 @@ pub enum CommandOption {
     Text {
         label: &'static str,
         default: &'static str,
+        placeholder: &'static str,
     },
 }
 

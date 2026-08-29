@@ -183,13 +183,13 @@ pub struct App {
     /// Whether to run in parallel (true) or sequentially (false).
     pub parallel: bool,
     /// Cancellation token for the current batch (None when idle).
-    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    pub cancel_token: Option<CancellationToken>,
     /// Residual files left over after a canceled batch (for cleanup prompt).
     pub residual_files: Vec<PathBuf>,
     /// Pending cleanup decision after cancellation.
     pub show_cleanup_prompt: bool,
-    /// Inline text editor state.
-    pub editing_text: Option<(String, String)>,
+    /// Inline text editor state: (label, buffer, placeholder)
+    pub editing_text: Option<(String, String, String)>,
 }
 impl App {
     /// Creates a fresh app state starting on the home screen.
@@ -319,7 +319,7 @@ impl App {
                     };
                     rows.push(format!("{:<20}: {} {}", label, val, unit));
                 }
-                CommandOption::Text { label, default } => {
+                CommandOption::Text { label, default, placeholder: _ } => {
                     let val = self
                         .options
                         .custom
@@ -363,11 +363,17 @@ impl App {
         }
 
         // Inline text editor intercepts keys
-        if let Some((label, buffer)) = &mut self.editing_text {
+        if let Some((label, buffer, _placeholder)) = &mut self.editing_text {
             match key.code {
                 KeyCode::Enter => {
                     let l = label.clone();
-                    let b = buffer.clone();
+                    let mut b = buffer.clone();
+
+                    // Parse "today" and "yesterday" keywords
+                    if l.contains("Since") || l.contains("Until") {
+                        b = parse_date_keyword(&b);
+                    }
+
                     self.options.custom.insert(l, b);
                     self.editing_text = None;
                 }
@@ -608,14 +614,28 @@ impl App {
         } else if row_text == "Start" {
             self.start_run(tx);
         } else if row_text.starts_with("Output directory") {
-            // Simple toggle for now, could be a text editor later
+            //note: Future - could be a directory picker
         } else if row_text.starts_with("Parallelism") {
             self.options.parallel = !self.options.parallel;
         } else {
             // It's a Text option! Open inline editor
             let label = row_text.split(':').next().unwrap().trim();
             let current = self.options.custom.get(label).cloned().unwrap_or_default();
-            self.editing_text = Some((label.to_string(), current));
+
+            // ✅ Find the placeholder from the command's options
+            let placeholder = self
+                .selected_command
+                .and_then(|i| {
+                    self.commands[i].options().into_iter()
+                    .find(|opt| matches!(opt, CommandOption::Text { label: l, .. } if *l == label))
+                    .and_then(|opt| match opt {
+                        CommandOption::Text { placeholder, .. } => Some(placeholder),
+                        _ => None,
+                    })
+                })
+                .unwrap_or("");
+
+            self.editing_text = Some((label.to_string(), current, placeholder.to_string()));
         }
     }
 
@@ -783,4 +803,15 @@ impl App {
 fn adjust_u32(current: u32, delta: i32, step: i32, min: i32, max: i32) -> u32 {
     let next = current as i32 + delta * step;
     next.clamp(min, max) as u32
+}
+
+/// Parses special date keywords ("today", "yesterday") into YYYY-MM-DD format.
+fn parse_date_keyword(input: &str) -> String {
+    match input.trim().to_lowercase().as_str() {
+        "today" => chrono::Local::now().format("%Y-%m-%d").to_string(),
+        "yesterday" => (chrono::Local::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string(),
+        other => other.to_string(),
+    }
 }

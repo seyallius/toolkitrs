@@ -190,11 +190,19 @@ fn render_options(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 
     // Render inline text editor popup if active
-    if let Some((label, buffer)) = &app.editing_text {
+    if let Some((label, buffer, placeholder)) = &app.editing_text {
+        // Show buffer if typing, otherwise show placeholder in dim color
+        let (display_text, is_placeholder) = if buffer.is_empty() {
+            (placeholder.as_str(), true)
+        } else {
+            (buffer.as_str(), false)
+        };
+
         let text = format!(
             "Editing: {}\n\n> {}█\n\n[Enter] save   [Esc] cancel",
-            label, buffer
+            label, display_text
         );
+
         let popup = Paragraph::new(text)
             .block(
                 Block::default()
@@ -203,12 +211,13 @@ fn render_options(f: &mut Frame, app: &App, area: Rect) {
                     .border_style(Style::default().fg(Color::Yellow))
                     .title(" Text Input "),
             )
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(if is_placeholder {
+                Color::DarkGray // Dim placeholder
+            } else {
+                Color::White // Bright when typing
+            }));
 
-        // Reuses the centered_rect helper that already exists in this file!
         let popup_area = centered_rect(60, 30, area);
-
-        // Clear the background behind the popup so text doesn't bleed through
         f.render_widget(Clear, popup_area);
         f.render_widget(popup, popup_area);
     }
