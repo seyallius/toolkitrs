@@ -6,6 +6,7 @@
 use crate::github::{api, filter, types::*, writer::SafeFileWriter};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 // --------------------------------- Types, Constants & Variables ------------------------------- //
 
@@ -20,18 +21,11 @@ const MAX_CONCURRENT: usize = MAX_WORKERS;
 ///
 /// This approach avoids storing all results in memory, matching the Go
 /// `ProcessRepositoriesWithDirectWrite` behavior.
-///
-/// # Arguments
-/// * `config` - The configuration containing the authenticated user and token.
-/// * `repos` - The list of repositories to process.
-/// * `file_writer` - The thread-safe file writer, shared via `Arc`.
-///
-/// # Returns
-/// A tuple of `(total_commits, repo_count)`.
 pub async fn process_repositories(
     config: &GhContribConfig,
     repos: &[Repository],
     file_writer: &Arc<SafeFileWriter>,
+    cancel: CancellationToken,
 ) -> (usize, usize) {
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
     let cfg = Arc::new(config.clone());
@@ -39,14 +33,23 @@ pub async fn process_repositories(
     let mut handles = Vec::with_capacity(repos.len());
 
     for repo in repos {
+        // ✅ Stop spawning new tasks if canceled
+        if cancel.is_cancelled() {
+            break;
+        }
+
         let permit = semaphore.clone();
         let writer = file_writer.clone();
         let cfg = cfg.clone();
         let repo_name = repo.name.clone();
+        let cancel_clone = cancel.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = permit.acquire().await.expect("semaphore closed");
-            process_single_repo(&cfg, &repo_name, &writer).await
+            if cancel_clone.is_cancelled() {
+                return None;
+            }
+            process_single_repo(&cfg, &repo_name, &writer, cancel_clone).await
         });
         handles.push(handle);
     }
@@ -61,9 +64,11 @@ pub async fn process_repositories(
                 total_commits += commit_count;
                 repo_count += 1;
             }
-            Ok(None) => {} // No commits for this repo
+            Ok(None) => {} // No commits for this repo or canceled
             Err(e) => {
-                eprintln!("Task join error: {e}");
+                if !cancel.is_cancelled() {
+                    eprintln!("Task join error: {e}");
+                }
             }
         }
     }
@@ -75,42 +80,58 @@ pub async fn process_repositories(
 
 /// Processes a single repository: fetches commits, filters them, optionally
 /// fetches README, and writes to the file.
-///
-/// # Returns
-/// `Some(commit_count)` if commits were found, `None` otherwise.
 async fn process_single_repo(
     config: &GhContribConfig,
     repo_name: &str,
     file_writer: &SafeFileWriter,
+    cancel: CancellationToken,
 ) -> Option<usize> {
+    if cancel.is_cancelled() {
+        return None;
+    }
+
     eprintln!("Fetching commits for {repo_name}...");
 
-    // Fetch commits
-    let commits = match api::fetch_commits(config, repo_name).await {
-        Ok(commits) => commits,
-        Err(e) => {
-            eprintln!("Error fetching {repo_name}: {e}");
-            return None;
+    // ✅ Fetch commits with instant cancellation support
+    let commits = tokio::select! {
+        _ = cancel.cancelled() => return None,
+        res = api::fetch_commits(config, repo_name) => match res {
+            Ok(commits) => commits,
+            Err(e) => {
+                if !cancel.is_cancelled() {
+                    eprintln!("Error fetching {repo_name}: {e}");
+                }
+                return None;
+            }
         }
     };
 
     let filtered = filter::filter_commits(&commits);
-    if filtered.is_empty() {
+    if filtered.is_empty() || cancel.is_cancelled() {
         return None;
     }
 
-    // Fetch README if configured
+    // ✅ Fetch README if configured, with cancellation support
     let readme_content = if config.fetch_readme {
-        match api::fetch_readme(config, repo_name).await {
-            Ok(content) => Some(content),
-            Err(e) => {
-                eprintln!("  Warning: Could not fetch README for {repo_name}: {e}");
-                None
+        tokio::select! {
+            _ = cancel.cancelled() => None,
+            res = api::fetch_readme(config, repo_name) => match res {
+                Ok(content) => Some(content),
+                Err(e) => {
+                    if !cancel.is_cancelled() {
+                        eprintln!("  Warning: Could not fetch README for {repo_name}: {e}");
+                    }
+                    None
+                }
             }
         }
     } else {
         None
     };
+
+    if cancel.is_cancelled() {
+        return None;
+    }
 
     let commit_count = filtered.len();
 

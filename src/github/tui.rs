@@ -61,11 +61,13 @@ impl TuiCommand for GhContribCommand {
         ]
     }
 
+    // ... inside impl TuiCommand for GhContribCommand ...
+
     fn execute(
         &self,
         _files: Vec<PathBuf>, // unused — no file picker
         options: &RunOptions,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
         _ffmpeg_path: &Path, // unused — not a media command
         tx: Sender<AppEvent>,
     ) -> Result<()> {
@@ -114,26 +116,47 @@ impl TuiCommand for GhContribCommand {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
+
         runtime.block_on(async {
+            if cancel.is_cancelled() {
+                return;
+            }
             let _ = tx.send(AppEvent::Log("Fetching repositories...".into()));
-            let repos = match github::api::fetch_repositories(&cfg).await {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.send(AppEvent::Log(format!("❌ {e}")));
-                    let _ = tx.send(AppEvent::AllDone {
-                        succeeded: 0,
-                        failed: 1,
-                    });
+
+            // Wrap initial fetch in select! for instant TUI response
+            let repos = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = tx.send(AppEvent::Log("⚠️ Cancelled".into()));
+                    let _ = tx.send(AppEvent::AllDone { succeeded: 0, failed: 0 });
                     return;
                 }
+                res = github::api::fetch_repositories(&cfg) => match res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::Log(format!("❌ {e}")));
+                        let _ = tx.send(AppEvent::AllDone { succeeded: 0, failed: 1 });
+                        return;
+                    }
+                }
             };
+
             let _ = tx.send(AppEvent::Log(format!("Found {} repositories", repos.len())));
+
+            if cancel.is_cancelled() {
+                let _ = tx.send(AppEvent::Log("⚠️ Cancelled".into()));
+                let _ = tx.send(AppEvent::AllDone {
+                    succeeded: 0,
+                    failed: 0,
+                });
+                return;
+            }
 
             let output_file = PathBuf::from(github::types::output_filename(
                 &cfg.username,
                 &cfg.since,
                 &cfg.until,
             ));
+
             let file_writer = match github::writer::SafeFileWriter::new(&output_file) {
                 Ok(w) => std::sync::Arc::new(w),
                 Err(e) => {
@@ -147,10 +170,24 @@ impl TuiCommand for GhContribCommand {
             };
 
             file_writer.write_header(&cfg.username, &cfg.since, &cfg.until);
-            let (total_commits, repo_count) =
-                github::processor::process_repositories(&cfg, &repos, &file_writer.clone()).await;
-            file_writer.write_summary(total_commits, repo_count);
 
+            // ✅ Pass the cancellation token down to the processor
+            let (total_commits, repo_count) =
+                github::processor::process_repositories(&cfg, &repos, &file_writer, cancel.clone())
+                    .await;
+
+            if cancel.is_cancelled() {
+                let _ = tx.send(AppEvent::Log(
+                    "⚠️ Cancelled by user. Output may be incomplete.".into(),
+                ));
+                let _ = tx.send(AppEvent::AllDone {
+                    succeeded: 0,
+                    failed: 0,
+                });
+                return;
+            }
+
+            file_writer.write_summary(total_commits, repo_count);
             let _ = tx.send(AppEvent::Log(format!(
                 "✅ Done! Output: {}",
                 output_file.display()

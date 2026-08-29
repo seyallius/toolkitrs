@@ -107,9 +107,27 @@ async fn run_async(cfg: types::GhContribConfig, output_path: Option<PathBuf>) ->
     // Write header once
     file_writer.write_header(&cfg.username, &cfg.since, &cfg.until);
 
+    // ✅ Set up cancellation for Ctrl+C
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let ctrl_c_handle = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\n⚠️ Cancellation requested (press Ctrl+C again to force exit)...");
+        cancel_clone.cancel();
+    });
+
     // Process repositories concurrently with direct file writing
     let (total_commits, repo_count) =
-        processor::process_repositories(&cfg, &repos, &file_writer).await;
+        processor::process_repositories(&cfg, &repos, &file_writer, cancel.clone()).await;
+
+    // Abort the ctrl-c listener since we're done
+    ctrl_c_handle.abort();
+
+    if cancel.is_cancelled() {
+        eprintln!("\n⚠️ Cancelled by user. Output may be incomplete.");
+        eprintln!("Partial output written to: {}", output_file.display());
+        return Ok(());
+    }
 
     // Write summary
     file_writer.write_summary(total_commits, repo_count);
