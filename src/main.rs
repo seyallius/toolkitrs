@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod components;
 mod ffmpeg;
+pub mod github;
 mod tui;
 mod util;
 mod workflow;

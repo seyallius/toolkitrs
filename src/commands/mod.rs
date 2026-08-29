@@ -2,6 +2,7 @@
 //! It dispatches CLI subcommands to their respective handler implementations.
 
 pub mod batch;
+pub mod gh_contrib;
 pub mod mkv2mp3;
 pub mod mp32mp4;
 pub mod ts2mp4;
@@ -32,6 +33,7 @@ pub fn run(cli: Cli) -> Result<()> {
             Command::Mkv2mp3(args) => mkv2mp3::run(args, &ffmpeg),
             Command::Mp32mp4(args) => mp32mp4::run(args, &ffmpeg),
             Command::Vidwrap(args) => vidwrap::run(args, &ffmpeg),
+            Command::GhContrib(args) => gh_contrib::run(args),
         },
     }
 }

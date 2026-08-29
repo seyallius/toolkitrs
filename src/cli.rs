@@ -3,7 +3,8 @@
 //! from annotated struct definitions.
 
 use crate::commands::{
-    mkv2mp3::Mkv2mp3Args, mp32mp4::Mp32mp4Args, ts2mp4::Ts2mp4Args, vidwrap::VidwrapArgs,
+    gh_contrib::GhContribArgs, mkv2mp3::Mkv2mp3Args, mp32mp4::Mp32mp4Args, ts2mp4::Ts2mp4Args,
+    vidwrap::VidwrapArgs,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -57,15 +58,14 @@ pub struct Cli {
 pub enum Command {
     /// Convert TS files to MP4 via stream copy (no re-encoding).
     Ts2mp4(Ts2mp4Args),
-
     /// Convert MKV files to MP3 with optional cover art extraction.
     Mkv2mp3(Mkv2mp3Args),
-
     /// Convert MP3 files to MP4 videos with embedded cover art as video track.
     Mp32mp4(Mp32mp4Args),
-
     /// Wrap a video with a companion image; supports interactive MP4 batch discovery.
     Vidwrap(VidwrapArgs),
+    /// Fetch and export GitHub contributions (commits) for a user.
+    GhContrib(GhContribArgs),
 }
 
 /// Common conversion options shared by batch processing commands.
