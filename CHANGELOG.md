@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/seyallius/toolkitrs/compare/v0.1.11...v0.1.12) - 2026-08-29
+
+### Added
+
+- *(gh-contrib)* add graceful Ctrl+C cancellation support
+- *(tui)* enhance text input with placeholders and date keyword parsing
+- *(gh-contrib)* add GitHub contributions exporter subcommand
+- *(cli)* migrate from positional args to Cobra flag-based interface
+
+### Fixed
+
+- *(gh-contrib)* strip whitespace from base64 README before decoding
+
+### Other
+
+- *(tui)* extract generic TuiCommand trait and integrate gh-contrib
+- *(gh-contrib)* reorganize code into internal packages
+- *(batch)* replace generic worker with FileJob strategy
+- *(wip)* extract queue resolution and unify parallel execution
+
 ## [0.1.11](https://github.com/seyallius/toolkitrs/compare/v0.1.10...v0.1.11) - 2026-08-27
 
 ### Added
