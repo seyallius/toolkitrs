@@ -84,8 +84,17 @@ pub async fn fetch_readme(config: &GhContribConfig, repo_name: &str) -> Result<S
     let readme_response: ReadmeResponse =
         serde_json::from_str(&body).context("parsing README response")?;
 
+    // GitHub embeds newlines in base64 content every ~60 chars.
+    // Rust's STANDARD decoder does NOT skip whitespace (unlike Go's),
+    // so we must strip it before decoding.
+    let content_clean: String = readme_response
+        .content
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+
     let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&readme_response.content)
+        .decode(&content_clean)
         .context("decoding README base64 content")?;
 
     String::from_utf8(decoded).context("converting README to UTF-8")
