@@ -1,5 +1,7 @@
 # 🛠️ toolkitrs
 
+> WIP - Current version is a prototype
+
 ![GitHub Release Downloads](https://img.shields.io/github/downloads/seyallius/toolkitrs/total?label=downloads&logo=github&color=pink&style=for-the-badge)
 ![Latest Release Downloads](https://img.shields.io/github/downloads/seyallius/toolkit/latest/total?label=latest%20release&logo=github&style=for-the-badge)
 ![Crates.io Downloads](https://img.shields.io/crates/d/toolkitrs?label=cargo%20installs&logo=rust&color=orange&style=for-the-badge)
