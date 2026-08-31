@@ -192,12 +192,12 @@ impl command::TuiCommand for Workflow {
         }
     }
 
+    /// Declares the configurable options shown on the TUI options screen.
     fn options(&self) -> Vec<command::CommandOption> {
         let mut opts = vec![command::CommandOption::Toggle {
             label: "Force overwrite",
             default: false,
         }];
-
         if self.uses_bitrate() {
             opts.push(command::CommandOption::Numeric {
                 label: "Audio bitrate",
@@ -208,7 +208,6 @@ impl command::TuiCommand for Workflow {
                 unit: "kbps",
             });
         }
-
         if self.uses_cover_size() {
             opts.push(command::CommandOption::Numeric {
                 label: "Cover size",
@@ -219,13 +218,9 @@ impl command::TuiCommand for Workflow {
                 unit: "px",
             });
         }
-
-        opts.push(command::CommandOption::Text {
-            label: "Output directory",
-            default: "out",
-            placeholder: "e.g., /path/to/output",
-        });
-
+        // NOTE: the output directory is surfaced by `App::option_rows()` from
+        // `RunOptions::output_dir` for picker-based workflows; exposing it here
+        // as well produced a duplicate row.
         opts
     }
 
@@ -240,37 +235,63 @@ impl command::TuiCommand for Workflow {
         let workflow_options = workflow_options(options);
         if self.uses_output_dir() {
             if let Err(error) = std::fs::create_dir_all(&workflow_options.output_dir) {
-                let _ = tx.send(crate::tui::event::AppEvent::Log(format!("❌ {error}")));
+                let _ = tx.send(crate::tui::event::AppEvent::Log(format!(
+                    "ERROR: {error}"
+                )));
             }
         }
-
         let concurrency = if options.parallel {
             crate::util::parallel::num_cpus()
         } else {
             1
         };
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-
         runtime.block_on(async {
             let (event_tx, mut event_rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::util::parallel::BatchEvent>();
+
+            // 🧵 Bridge ffmpeg stderr into the TUI log pane. Library code must
+            // never print to the terminal directly while the TUI owns it — that
+            // corrupts the alternate-screen rendering.
+            let (ffmpeg_log_tx, mut ffmpeg_log_rx) =
+                tokio::sync::mpsc::unbounded_channel::<String>();
+            let ui_tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(line) = ffmpeg_log_rx.recv().await {
+                    if ui_tx
+                        .send(crate::tui::event::AppEvent::Log(line))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+
             let workflow = *self;
             let options_clone = workflow_options.clone();
             let ffmpeg_path_clone = ffmpeg_path.to_path_buf();
-
             let worker = move |input: PathBuf, cancel: CancellationToken| {
                 let workflow = workflow;
                 let options = options_clone.clone();
                 let ffmpeg_path = ffmpeg_path_clone.clone();
+                let ffmpeg_log_tx = ffmpeg_log_tx.clone();
                 Box::pin(async move {
                     let output = workflow.output_path(&input, &options)?;
                     if output.exists() && !options.force {
                         return Ok(output);
                     }
                     workflow
-                        .run_async(input, output, &options, &ffmpeg_path, cancel, None)
+                        .run_async(
+                            input,
+                            output,
+                            &options,
+                            &ffmpeg_path,
+                            cancel,
+                            Some(ffmpeg_log_tx),
+                        )
                         .await
                 })
             };
@@ -392,7 +413,10 @@ async fn run_mkv2mp3(
     cancel_if_requested(&cancel)?;
 
     if !has_cover {
-        eprintln!("WARNING: cover extraction failed for {}", input.display());
+        emit_warning(
+            &log_tx,
+            format!("WARNING: cover extraction failed for {}", input.display()),
+        );
     }
 
     // Step 2: encode the MP3, attaching the cover if present.
@@ -437,9 +461,12 @@ async fn run_mp32mp4(
     {
         Ok(_) => has_file_content(&cover),
         Err(error) => {
-            eprintln!(
-                "WARNING: failed to extract cover from {}: {error}",
-                input.display()
+            emit_warning(
+                &log_tx,
+                format!(
+                    "WARNING: failed to extract cover from {}: {error}",
+                    input.display()
+                ),
             );
             cleanup_temp_file(&cover);
             false
@@ -489,5 +516,19 @@ fn cancel_if_requested(cancel: &CancellationToken) -> Result<()> {
         Err(Cancelled.into())
     } else {
         Ok(())
+    }
+}
+
+/// Emits a non-fatal warning through the log channel when one is available.
+///
+/// The TUI renders on the alternate screen in raw mode; any direct write to
+/// stderr corrupts the frame. TUI callers always pass `Some(tx)`, while CLI
+/// paths pass `None` and keep their stderr output.
+fn emit_warning(log_tx: &Option<UnboundedSender<String>>, message: String) {
+    match log_tx {
+        Some(tx) => {
+            let _ = tx.send(message);
+        }
+        None => eprintln!("{message}"),
     }
 }

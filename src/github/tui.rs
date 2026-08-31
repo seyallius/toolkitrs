@@ -1,4 +1,9 @@
 //! module github::tui - TUI integration for the GitHub contributions exporter.
+//!
+//! Text options follow the "placeholder is the default" convention: the TUI
+//! stores whatever the inline editor displays when the user accepts it without
+//! typing. That makes `since` default to `yesterday` and `until` default to
+//! `today`; the keywords are resolved by `github::config` for CLI and TUI alike.
 
 use crate::{
     github,
@@ -14,45 +19,53 @@ use std::{
     sync::mpsc::Sender,
 };
 use tokio_util::sync::CancellationToken;
+
 // ------------------------------------------ Types & Impls ------------------------------------- //
 
 /// The gh-contrib command as a TUI-executable workflow.
 #[derive(Debug)]
 pub struct GhContribCommand;
 impl TuiCommand for GhContribCommand {
+    /// Stable identifier for this command.
     fn id(&self) -> &'static str {
         "gh-contrib"
     }
 
+    /// Short title shown in the home list.
     fn title(&self) -> &'static str {
         "gh-contrib"
     }
 
+    /// One-line description shown next to the title.
     fn description(&self) -> &'static str {
         "Export GitHub commits to a text file"
     }
 
+    /// gh-contrib fetches from the GitHub API, so no file picker is needed.
     fn file_picker_mode(&self) -> FilePickerMode {
-        // No file picker — this command fetches from the GitHub API.
         FilePickerMode::NotNeeded
     }
 
+    /// Configurable options shown on the options screen.
+    ///
+    /// NOTE: for `Text` options the placeholder doubles as the default value:
+    /// accepting the editor without typing stores exactly what was displayed.
     fn options(&self) -> Vec<CommandOption> {
         vec![
             CommandOption::Text {
                 label: "GitHub username",
                 default: "",
-                placeholder: "e.g., octocat",
+                placeholder: "",
             },
             CommandOption::Text {
                 label: "Since (YYYY-MM-DD)",
                 default: "yesterday",
-                placeholder: "YYYY-MM-DD or 'yesterday'",
+                placeholder: "yesterday",
             },
             CommandOption::Text {
                 label: "Until (YYYY-MM-DD)",
                 default: "today",
-                placeholder: "YYYY-MM-DD or 'today'",
+                placeholder: "today",
             },
             CommandOption::Toggle {
                 label: "Skip README files",
@@ -61,8 +74,8 @@ impl TuiCommand for GhContribCommand {
         ]
     }
 
-    // ... inside impl TuiCommand for GhContribCommand ...
-
+    /// Runs the gh-contrib workflow, streaming all progress through `tx`
+    /// so the TUI renderer stays the sole owner of the terminal.
     fn execute(
         &self,
         _files: Vec<PathBuf>, // unused — no file picker
@@ -93,7 +106,7 @@ impl TuiCommand for GhContribCommand {
             .unwrap_or(false);
 
         if username.is_empty() || since.is_empty() || until.is_empty() {
-            let _ = tx.send(AppEvent::Log("❌ Missing username or dates".into()));
+            let _ = tx.send(AppEvent::Log("ERROR: missing username or dates".into()));
             let _ = tx.send(AppEvent::AllDone {
                 succeeded: 0,
                 failed: 1,
@@ -101,10 +114,11 @@ impl TuiCommand for GhContribCommand {
             return Ok(());
         }
 
+        // `new_config` resolves `today` / `yesterday` for us.
         let cfg = match github::config::new_config(&username, &since, &until, !no_readme) {
             Ok(c) => c,
             Err(e) => {
-                let _ = tx.send(AppEvent::Log(format!("❌ {e}")));
+                let _ = tx.send(AppEvent::Log(format!("ERROR: {e}")));
                 let _ = tx.send(AppEvent::AllDone {
                     succeeded: 0,
                     failed: 1,
@@ -116,24 +130,23 @@ impl TuiCommand for GhContribCommand {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-
         runtime.block_on(async {
             if cancel.is_cancelled() {
                 return;
             }
             let _ = tx.send(AppEvent::Log("Fetching repositories...".into()));
 
-            // Wrap initial fetch in select! for instant TUI response
+            // Wrap initial fetch in select! for instant TUI response.
             let repos = tokio::select! {
                 _ = cancel.cancelled() => {
-                    let _ = tx.send(AppEvent::Log("⚠️ Cancelled".into()));
+                    let _ = tx.send(AppEvent::Log("Cancelled".into()));
                     let _ = tx.send(AppEvent::AllDone { succeeded: 0, failed: 0 });
                     return;
                 }
                 res = github::api::fetch_repositories(&cfg) => match res {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ = tx.send(AppEvent::Log(format!("❌ {e}")));
+                        let _ = tx.send(AppEvent::Log(format!("ERROR: {e}")));
                         let _ = tx.send(AppEvent::AllDone { succeeded: 0, failed: 1 });
                         return;
                     }
@@ -141,9 +154,8 @@ impl TuiCommand for GhContribCommand {
             };
 
             let _ = tx.send(AppEvent::Log(format!("Found {} repositories", repos.len())));
-
             if cancel.is_cancelled() {
-                let _ = tx.send(AppEvent::Log("⚠️ Cancelled".into()));
+                let _ = tx.send(AppEvent::Log("Cancelled".into()));
                 let _ = tx.send(AppEvent::AllDone {
                     succeeded: 0,
                     failed: 0,
@@ -156,11 +168,10 @@ impl TuiCommand for GhContribCommand {
                 &cfg.since,
                 &cfg.until,
             ));
-
             let file_writer = match github::writer::SafeFileWriter::new(&output_file) {
                 Ok(w) => std::sync::Arc::new(w),
                 Err(e) => {
-                    let _ = tx.send(AppEvent::Log(format!("❌ {e}")));
+                    let _ = tx.send(AppEvent::Log(format!("ERROR: {e}")));
                     let _ = tx.send(AppEvent::AllDone {
                         succeeded: 0,
                         failed: 1,
@@ -168,17 +179,29 @@ impl TuiCommand for GhContribCommand {
                     return;
                 }
             };
-
             file_writer.write_header(&cfg.username, &cfg.since, &cfg.until);
 
-            // ✅ Pass the cancellation token down to the processor
-            let (total_commits, repo_count) =
-                github::processor::process_repositories(&cfg, &repos, &file_writer, cancel.clone())
-                    .await;
+            // 🧵 Progress logger for the pool: forwards into the TUI event
+            // channel instead of stderr. Direct terminal writes would corrupt
+            // the alternate-screen frame.
+            let log_tx = tx.clone();
+            let progress_log = move |line: &str| {
+                let _ = log_tx.send(AppEvent::Log(line.to_string()));
+            };
+
+            // 📦 Pass the cancellation token (and the TUI-safe logger) down.
+            let (total_commits, repo_count) = github::processor::process_repositories(
+                &cfg,
+                &repos,
+                &file_writer,
+                cancel.clone(),
+                progress_log,
+            )
+            .await;
 
             if cancel.is_cancelled() {
                 let _ = tx.send(AppEvent::Log(
-                    "⚠️ Cancelled by user. Output may be incomplete.".into(),
+                    "Cancelled by user. Output may be incomplete.".into(),
                 ));
                 let _ = tx.send(AppEvent::AllDone {
                     succeeded: 0,
@@ -189,7 +212,7 @@ impl TuiCommand for GhContribCommand {
 
             file_writer.write_summary(total_commits, repo_count);
             let _ = tx.send(AppEvent::Log(format!(
-                "✅ Done! Output: {}",
+                "Done! Output: {}",
                 output_file.display()
             )));
             let _ = tx.send(AppEvent::AllDone {

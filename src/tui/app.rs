@@ -36,6 +36,9 @@ const COVER_SIZE_MIN: i32 = 100;
 /// Maximum cover size allowed by the options screen.
 const COVER_SIZE_MAX: i32 = 2000;
 
+/// Upper bound for retained log lines; oldest lines are evicted first.
+const MAX_LOG_LINES: usize = 500;
+
 // ------------------------------------------ Types & Impls ------------------------------------- //
 
 /// Which screen is currently active.
@@ -240,9 +243,16 @@ impl App {
         SPINNER_FRAMES[self.spinner_frame]
     }
 
-    /// Appends a line to the log pane.
+    /// Appends a line to the log pane, evicting the oldest lines past the cap.
+    ///
+    /// Long ffmpeg runs can emit hundreds of progress lines; bounding the buffer
+    /// keeps memory and redraw cost flat.
     pub fn push_log(&mut self, line: String) {
         self.log.push(line);
+        if self.log.len() > MAX_LOG_LINES {
+            let overflow = self.log.len() - MAX_LOG_LINES;
+            self.log.drain(..overflow);
+        }
     }
 
     /// Marks the file at `index` as running.
@@ -319,7 +329,11 @@ impl App {
                     };
                     rows.push(format!("{:<20}: {} {}", label, val, unit));
                 }
-                CommandOption::Text { label, default, placeholder: _ } => {
+                CommandOption::Text {
+                    label,
+                    default,
+                    placeholder: _,
+                } => {
                     let val = self
                         .options
                         .custom
@@ -357,36 +371,41 @@ impl App {
             self.should_quit = true;
             return;
         }
-
         if self.try_cancel_running_batch(key) {
             return;
         }
 
-        // Inline text editor intercepts keys
-        if let Some((label, buffer, _placeholder)) = &mut self.editing_text {
+        // Inline text editor intercepts keys while it is open.
+        //
+        // `take()` moves the editor state out so each branch either finishes
+        // editing (leaving `None`) or restores the state — no borrow conflicts.
+        if let Some((label, mut buffer, placeholder)) = self.editing_text.take() {
             match key.code {
                 KeyCode::Enter => {
-                    let l = label.clone();
-                    let mut b = buffer.clone();
-
-                    // Parse "today" and "yesterday" keywords
-                    if l.contains("Since") || l.contains("Until") {
-                        b = parse_date_keyword(&b);
-                    }
-
-                    self.options.custom.insert(l, b);
-                    self.editing_text = None;
+                    // The placeholder doubles as the default value: accepting an
+                    // empty editor stores exactly what was displayed.
+                    let value = if buffer.trim().is_empty() {
+                        placeholder
+                    } else {
+                        buffer
+                    };
+                    self.options.custom.insert(label, value);
                 }
                 KeyCode::Esc => {
-                    self.editing_text = None;
+                    // Discard the buffer; `editing_text` is already None.
                 }
                 KeyCode::Char(c) => {
                     buffer.push(c);
+                    self.editing_text = Some((label, buffer, placeholder));
                 }
                 KeyCode::Backspace => {
                     buffer.pop();
+                    self.editing_text = Some((label, buffer, placeholder));
                 }
-                _ => {}
+                _ => {
+                    // Ignore navigation/modifier keys; keep editing.
+                    self.editing_text = Some((label, buffer, placeholder));
+                }
             }
             return;
         }
@@ -707,12 +726,31 @@ impl App {
         self.selected_files.clear();
         self.log.clear();
         self.finished = false;
-
+        self.reset_options_for_command();
         if self.commands[cmd_idx].file_picker_mode() == command::FilePickerMode::NotNeeded {
             self.screen = Screen::Options;
         } else {
             self.load_directory(&current_dir);
             self.screen = Screen::FilePicker;
+        }
+    }
+
+    /// Resets per-command option overrides and seeds Text option defaults.
+    ///
+    /// Seeding guarantees `execute()` sees the advertised defaults (e.g.
+    /// "yesterday" / "today" for gh-contrib) even when the user never opens the
+    /// inline editor. Re-selecting a command always starts from a clean slate.
+    fn reset_options_for_command(&mut self) {
+        self.options.custom.clear();
+        let Some(cmd_idx) = self.selected_command else {
+            return;
+        };
+        for option in self.commands[cmd_idx].options() {
+            if let CommandOption::Text { label, default, .. } = option {
+                self.options
+                    .custom
+                    .insert(label.to_string(), default.to_string());
+            }
         }
     }
 
@@ -803,15 +841,4 @@ impl App {
 fn adjust_u32(current: u32, delta: i32, step: i32, min: i32, max: i32) -> u32 {
     let next = current as i32 + delta * step;
     next.clamp(min, max) as u32
-}
-
-/// Parses special date keywords ("today", "yesterday") into YYYY-MM-DD format.
-fn parse_date_keyword(input: &str) -> String {
-    match input.trim().to_lowercase().as_str() {
-        "today" => chrono::Local::now().format("%Y-%m-%d").to_string(),
-        "yesterday" => (chrono::Local::now() - chrono::Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string(),
-        other => other.to_string(),
-    }
 }
