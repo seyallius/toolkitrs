@@ -17,22 +17,23 @@ use std::path::PathBuf;
 /// Arguments for the `gh-contrib` subcommand.
 ///
 /// Fetches GitHub commits for a user within a date range and exports them
-/// to a formatted text file.
+/// to a formatted text file. Dates accept `YYYY-MM-DD`, `today`, or `yesterday`.
 #[derive(Debug, Args)]
 #[command(after_help = "Examples:
-toolkitrs gh-contrib --username seyallius --since 2026-01-01 --until 2026-08-27
-toolkitrs gh-contrib -u seyallius -s 2026-01-01 -t 2026-08-27 --no-readme
-toolkitrs gh-contrib -u seyallius -s 2026-01-01 -t 2026-08-27 -o ./output.txt")]
+  toolkitrs gh-contrib --username seyallius --since 2026-01-01 --until 2026-08-27
+  toolkitrs gh-contrib -u seyallius -s yesterday -t today
+  toolkitrs gh-contrib -u seyallius -s 2026-01-01 -t 2026-08-27 --no-readme
+  toolkitrs gh-contrib -u seyallius -s 2026-01-01 -t 2026-08-27 -o ./output.txt")]
 pub struct GhContribArgs {
     /// GitHub username (required).
     #[arg(short, long)]
     pub username: String,
 
-    /// Start date in YYYY-MM-DD format (required).
+    /// Start date: YYYY-MM-DD, 'today' or 'yesterday' (required).
     #[arg(short, long)]
     pub since: String,
 
-    /// End date in YYYY-MM-DD format (required).
+    /// End date: YYYY-MM-DD, 'today' or 'yesterday' (required).
     #[arg(short = 't', long)]
     pub until: String,
 
@@ -116,9 +117,17 @@ async fn run_async(cfg: types::GhContribConfig, output_path: Option<PathBuf>) ->
         cancel_clone.cancel();
     });
 
-    // Process repositories concurrently with direct file writing
-    let (total_commits, repo_count) =
-        processor::process_repositories(&cfg, &repos, &file_writer, cancel.clone()).await;
+    // Process repositories concurrently with direct file writing.
+    // The CLI prints progress to stderr through the injected logger; the TUI
+    // passes an event-channel logger instead (see github::tui).
+    let (total_commits, repo_count) = processor::process_repositories(
+        &cfg,
+        &repos,
+        &file_writer,
+        cancel.clone(),
+        |line: &str| eprintln!("{line}"),
+    )
+    .await;
 
     // Abort the ctrl-c listener since we're done
     ctrl_c_handle.abort();
